@@ -1,0 +1,5 @@
+# Skylanders Giants (EUR). Format: runtime/profile.cpp.
+
+# The HUD button (keyboard E, gamepad left stick click): a tap on the touch screen, which swaps the two Skylanders
+# of the Portaltron's crystals ("Tap the Touch Screen").
+button tap 160 120
