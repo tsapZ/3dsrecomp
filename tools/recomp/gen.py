@@ -336,11 +336,13 @@ class Analyzer:
 
     @staticmethod
     def is_trap(i):
-        """The permanently undefined instruction compilers emit for __builtin_trap (GCC: `udf #0`, 0xE7F000F0):
-        a deliberate stop inside real code, not a sign that the bytes are data."""
+        """The permanently undefined instruction compilers emit for __builtin_trap (GCC: `udf #0`, 0xE7F000F0), and
+        `bkpt` (ARM 0xE1200070, Thumb 0xBExx), which ARM's compiler leaves at failed asserts (Skylanders Giants: 43
+        of them, inside functions reached only through vtables): a deliberate stop inside real code, not a sign that
+        the bytes are data."""
         if i.thumb:
-            return (i.word & 0xFF00) == 0xDE00
-        return (i.word & 0xFFF000F0) == 0xE7F000F0
+            return (i.word & 0xFF00) in (0xDE00, 0xBE00)
+        return (i.word & 0xFFF000F0) in (0xE7F000F0, 0xE1200070)
 
     def writes(self, a, r):
         """Does the ARM instruction at a (possibly) write register r?"""
