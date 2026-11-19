@@ -49,6 +49,11 @@ if sys.platform == 'darwin':
         return out.raw
 else:
     _lib = ctypes.util.find_library('crypto')
+    if not _lib and sys.platform == 'win32':
+        # Windows has no system libcrypto; python.org's Python ships OpenSSL's next to its own modules
+        _dlls = os.path.join(sys.base_prefix, 'DLLs')
+        _found = sorted(f for f in os.listdir(_dlls) if f.startswith('libcrypto')) if os.path.isdir(_dlls) else []
+        _lib = os.path.join(_dlls, _found[-1]) if _found else None
     assert _lib, 'AES needs OpenSSL (libcrypto)'
     _ssl = ctypes.CDLL(_lib)
     _ssl.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
