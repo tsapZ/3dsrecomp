@@ -235,7 +235,7 @@ static void collect(const fs::path &dir, const std::string &rel, std::vector<Ent
     for (auto &n : names) {
         fs::path p = dir / n;
         struct stat st;
-        if (stat(p.c_str(), &st)) continue;
+        if (stat(p.string().c_str(), &st)) continue;
         if (S_ISDIR(st.st_mode)) {
             out.push_back({rel + n, p, true});
             collect(p, rel + n + "/", out, s);
@@ -274,7 +274,7 @@ static void tar_add(std::string &t, const std::string &name, const std::string &
     t.append((512 - data.size() % 512) % 512, '\0');
 }
 static bool read_file(const fs::path &p, std::string *out) {
-    FILE *f = fopen(p.c_str(), "rb");
+    FILE *f = fopen(p.string().c_str(), "rb");
     if (!f) return false;
     out->clear();
     char buf[1 << 16];
@@ -351,7 +351,7 @@ static bool tar_extract(const std::string &t, const fs::path &dst, std::string *
         fs::path p = dst / e.name;
         if (e.dir) { fs::create_directories(p, ec); continue; }
         fs::create_directories(p.parent_path(), ec);
-        FILE *f = fopen(p.c_str(), "wb");
+        FILE *f = fopen(p.string().c_str(), "wb");
         bool ok = f && fwrite(t.data() + e.off, 1, e.size, f) == e.size && !fflush(f) && !fsync(fileno(f));
         if (f) ok = !fclose(f) && ok;
         if (!ok) { *why = "could not write " + p.string() + ": " + strerror(errno); return false; }
@@ -374,10 +374,10 @@ static State state_read(const fs::path &dir) {
 }
 static void state_write(const fs::path &dir, const State &s) {
     fs::path tmp = dir / ".cloud.tmp";
-    FILE *f = fopen(tmp.c_str(), "w");
+    FILE *f = fopen(tmp.string().c_str(), "w");
     if (!f) return;
     fprintf(f, "hash=%s\nsaved=%lld\n", s.hash.c_str(), (long long)s.saved);
-    if (!fclose(f)) rename(tmp.c_str(), (dir / ".cloud").c_str());
+    if (!fclose(f)) rename(tmp.string().c_str(), (dir / ".cloud").string().c_str());
 }
 // When the save here was saved: as synced, or (changed since) its newest file's time. No save: when it was deleted
 // (cloud_deleted), else never.

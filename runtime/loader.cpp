@@ -50,7 +50,11 @@ void update_shared_page_time() {
         time_t now = time(nullptr) + (time_t)g_settings.clock_offset;  // the menu's Clock page
         struct tm lt;
         localtime_r(&now, &lt);
+#ifdef _WIN32
+        local = (s64)_mkgmtime(&lt);
+#else
         local = (s64)now + lt.tm_gmtoff;
+#endif
     }
     u64 ms = (u64)(local + 2208988800ll) * 1000ull;
     u32 counter = r32(sp);

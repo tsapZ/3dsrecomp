@@ -10,11 +10,13 @@
 //
 // Elsewhere (macOS), the page is protected entirely and the fault addresses are sampled: watch_report() prints
 // which host functions touched the 16 KiB page, as a histogram, at the end of the run or before a fatal error.
+#ifndef _WIN32
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -27,6 +29,13 @@
 #include "platform.h"
 #include "rt.h"
 
+#ifdef _WIN32
+// (not on Windows yet: no SIGSEGV/SIGTRAP and mprotect there)
+void watch_arm(u32, u32) {}
+void watch_init() {}
+void watch_poll() {}
+void watch_report() {}
+#else
 namespace {
 constexpr uintptr_t kPage = 0x4000;  // (16 KiB: a page on every host, a whole number of pages on x86-64)
 u8 *watch_page;                      // host page holding the watched bytes
@@ -193,3 +202,4 @@ void watch_report() {
     for (auto &kv : hits) by_fn[symbol_of((void *)kv.first)] += kv.second;
     for (auto &kv : by_fn) LOG("[watch] %8llu %s\n", (unsigned long long)kv.second, kv.first.c_str());
 }
+#endif  // _WIN32

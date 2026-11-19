@@ -1,5 +1,10 @@
 // Logging, guest memory reservation, and the address -> recompiled function dispatcher.
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <sys/mman.h>
+#endif
 #include <unistd.h>
 
 #include <dlfcn.h>
@@ -90,8 +95,14 @@ static u32 hle_next = HLE_BASE;
 void init() {
     // 4 GiB for the guest address space plus a guard so unaligned accesses at the top stay mapped
     size_t size = (1ull << 32) + 0x10000;
+#ifdef _WIN32
+    // reserved and committed at once; Windows hands out the physical pages only when they are touched
+    void *p = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!p)
+#else
     void *p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED)
+#endif
         FATAL(TARGET_OS_IOS ? "cannot reserve guest memory (an iPhone or iPad needs the app signed with the Extended "
                               "Virtual Addressing capability)\n"
                             : "cannot reserve guest memory\n");
@@ -197,7 +208,7 @@ static const GuestEntry *lazy_lookup(u32 addr) {
 }
 
 static bool lazy_compile(u32 addr) {
-#if defined(RECOMP_SOURCE_DIR) && !TARGET_OS_IOS && !defined(RECOMP_MODULES)  // (iOS has no compiler to run)
+#if defined(RECOMP_SOURCE_DIR) && !TARGET_OS_IOS && !defined(RECOMP_MODULES) && !defined(_WIN32)  // (iOS has no compiler to run)
     std::string root = RECOMP_SOURCE_DIR;
     std::string game = RECOMP_GAME;
     char gamedir[4096];

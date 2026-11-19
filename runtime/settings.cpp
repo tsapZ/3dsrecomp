@@ -118,7 +118,7 @@ std::string save_summary() {
     time_t newest = 0;
     for (auto it = fs::recursive_directory_iterator(p, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
         struct stat st;
-        if (it->is_regular_file(ec) && stat(it->path().c_str(), &st) == 0) newest = std::max(newest, st.st_mtime);
+        if (it->is_regular_file(ec) && stat(it->path().string().c_str(), &st) == 0) newest = std::max(newest, st.st_mtime);
     }
     u64 bytes = dir_bytes(p) + dir_bytes(kernel::save_root() + "/extdata");
     char when[64] = "";
