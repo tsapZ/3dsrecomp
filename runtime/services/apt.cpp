@@ -497,6 +497,11 @@ struct AptService : Service {
             ipc.ok(2);
             ipc.set(2, 0);
             break;
+        case 0x0103:  // GetApplicationRunningMode: an Old 3DS (as above), the application registered (1); unanswered,
+                      // the game read whatever the request left in that word (SuperChargers Racing asks at startup)
+            ipc.ok(2);
+            ipc.set(2, 1);
+            break;
         default:
             unimplemented(ipc);
         }
