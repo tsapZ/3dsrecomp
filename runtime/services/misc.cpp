@@ -1,5 +1,6 @@
 // Small services: ptm, ndm, ac, frd, boss, cecd, news, ir, mic, cam, y2r, ldr:ro, soc, ssl, http, ...
 #include <algorithm>
+#include <deque>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -7,6 +8,7 @@
 #include "../loader.h"
 #include "../service.h"
 #include "services.h"
+#include "skylanders_portal.h"
 
 namespace kernel {
 
@@ -438,6 +440,9 @@ struct IrState {
     u32 packets = 0, ring_size = 0;  // receive buffer: packet slots, bytes (infos and data)
     bool connected = false;
     u32 period_ms = 0;  // the pad's polling period (0: not asked yet)
+    bool portal = false;   // AutoConnection connected the Skylanders portal (else the Circle Pad Pro)
+    bool by_copy = false;  // InitializeIrNop: the game takes packets with ReceiveIrnop(Large), not from the ring
+    std::deque<std::vector<u8>> copies;  // (those packets)
     u64 next_poll = 0;  // (system ticks)
     // receive buffer state
     u32 begin = 0, end = 0, count = 0;
@@ -501,7 +506,17 @@ void ir_put(const std::vector<u8> &payload) {
     ir_store_info();
     ir.recv->signal();
 }
+void ir_to_game(const std::vector<u8> &payload) {
+    if (ir.by_copy) {
+        ir.copies.push_back(payload);
+        ir.recv->signal();
+        return;
+    }
+    ir_put(payload);
+}
 void ir_disconnect() {
+    if (ir.portal) skylanders_portal::on_disconnect();
+    ir.portal = false;
     ir.connected = false;
     ir.period_ms = 0;
     if (ir.shm) {
@@ -556,6 +571,8 @@ struct Ir : Service {
         switch (ipc.cmd()) {
         case 0x0002:  // FinalizeIrNop
             ir_disconnect();
+            ir.by_copy = false;
+            ir.copies.clear();
             ir.shm.reset();
             ir.packets = 0;
             ipc.ok();
@@ -596,11 +613,83 @@ struct Ir : Service {
                 ipc.result(0xC8A10414);  // not connected
                 break;
             }
-            cpp_request(gptr(ipc[3]), ipc[1]);
+            if (ir.portal) skylanders_portal::on_receive(gptr(ipc[3]), ipc[1], ir_to_game);
+            else cpp_request(gptr(ipc[3]), ipc[1]);
             ir.send->signal();
             ipc.ok();
             break;
+        case 0x000E:  // SendIrNopLarge(size, mapped buffer)
+            if (!ir.connected) {
+                ipc.result(0xC8A10414);  // not connected
+                break;
+            }
+            if (ir.portal) skylanders_portal::on_receive(gptr(ipc[3]), ipc[1], ir_to_game);
+            else cpp_request(gptr(ipc[3]), ipc[1]);
+            ir.send->signal();
+            ipc.ok(1, 2);
+            ipc.set(2, ipc[2]);
+            ipc.set(3, ipc[3]);
+            break;
+        case 0x0007:  // AutoConnection: the Skylanders 3DS games connect their portal this way
+            if (ir.shm) {
+                w8(ir.shm->backing + IR_HDR_STATUS, IR_STATUS_CONNECTED);
+                w8(ir.shm->backing + IR_HDR_ROLE, IR_ROLE_CONNECTED);
+                w8(ir.shm->backing + IR_HDR_CONNECTED, 1);
+                ir.connected = true;
+                ir.portal = true;
+                skylanders_portal::on_connect();
+                ir.conn->signal();
+            }
+            ipc.ok();
+            break;
+        case 0x000F:    // ReceiveIrnop(size): a packet into the static buffer
+        case 0x0010: {  // ReceiveIrnopLarge(size, mapped buffer)
+            if (ir.copies.empty()) {
+                // (no data: description 1007, module IR, summary not found, level status)
+                ipc.result(1007u | 67u << 10 | 4u << 21 | 25u << 27, 1, ipc.cmd() == 0x0010 ? 2 : 0);
+                if (ipc.cmd() == 0x0010) {
+                    ipc.set(2, ipc[2]);
+                    ipc.set(3, ipc[3]);
+                }
+                break;
+            }
+            std::vector<u8> d = std::move(ir.copies.front());
+            ir.copies.pop_front();
+            if (d.size() > ipc[1]) d.resize(ipc[1]);
+            const u32 waiting = (u32)ir.copies.size();
+            if (ipc.cmd() == 0x000F) {
+                u32 room = 0;
+                const u32 dst = ipc.static_buffer(0, &room);
+                if (d.size() > room) d.resize(room);
+                for (size_t i = 0; i < d.size(); i++) w8(dst + (u32)i, d[i]);
+                ipc.ok(3, 2);
+                ipc.set(2, (u32)d.size());
+                ipc.set(3, waiting);
+                ipc.static_desc(4, 0, (u32)d.size());
+            } else {
+                for (size_t i = 0; i < d.size(); i++) w8(ipc[3] + (u32)i, d[i]);
+                ipc.ok(3, 2);
+                ipc.set(2, (u32)d.size());
+                ipc.set(3, waiting);
+                ipc.set(4, ipc[2]);
+                ipc.set(5, ipc[3]);
+            }
+            break;
+        }
+        case 0x0011:  // GetLatestReceiveErrorResult: the emulated link has no errors (Spyro's Adventure finalizes
+        case 0x0012:  // GetLatestSendErrorResult    infrared when these fail)
+            ipc.ok(2);
+            ipc.set(2, 0);
+            break;
+        case 0x0013:  // GetConnectionStatus
+        case 0x0017:  // GetConnectionRole
+            ipc.ok(2);
+            ipc.set(2, ir.shm ? r8(ir.shm->backing + (ipc.cmd() == 0x0013 ? IR_HDR_STATUS : IR_HDR_ROLE)) : 0);
+            break;
+        case 0x0001:  // InitializeIrNop (Spyro's Adventure): as InitializeIrNopShared, packets by ReceiveIrnop
         case 0x0018:  // InitializeIrNopShared(shared size, recv size, recv packets, send size, send packets, baud, shm)
+            ir.by_copy = ipc.cmd() == 0x0001;
+            ir.copies.clear();
             if (auto m = get<SharedMem>(ipc[8])) {
                 ir.shm = m;
                 ir.ring_size = ipc[2];
