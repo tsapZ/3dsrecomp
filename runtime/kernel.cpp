@@ -20,6 +20,10 @@ static std::map<Handle, ObjPtr> handles;
 static Handle next_handle = 0x00010001;
 static std::vector<std::shared_ptr<Thread>> threads;
 static Thread *running = nullptr;
+// The 3DS's two CPU cores, time-sliced: one guest thread runs at a time, so a thread that has run this long gives way
+// to a ready thread of the other core (core_slice_patch.py); running_since is when `running` last changed.
+constexpr u64 kCoreSliceNs = 1000000;
+static u64 running_since = 0;
 static u64 ready_counter = 1;
 static u32 next_thread_id = 1;
 static std::set<u32> tls_used;
@@ -221,6 +225,17 @@ static Thread *best_ready() {
     return best;
 }
 
+static Thread *best_ready_other_core(s32 core) {
+    Thread *best = nullptr;
+    for (auto &t : threads) {
+        if (t->status != TStatus::Ready || t->core == core) continue;
+        if (!best || t->priority < best->priority ||
+            (t->priority == best->priority && t->ready_seq < best->ready_seq))
+            best = t.get();
+    }
+    return best;
+}
+
 // RECOMP_SCHEDLOG=all (or a thread id): a timeline of the scheduler in the log ([sched] lines): threads made and
 // ended, each wait (on what, called from where) and each wake-up, with the frame number every log line has
 static int schedlog_thread() {
@@ -253,6 +268,7 @@ static void switch_from(Thread *cur, Lock &lk) {
         running = nullptr;
         while (!(next = best_ready()) && det_run_next(UINT64_MAX, lk)) flush_deferred();
     }
+    if (next != running) running_since = now_ns();
     running = next;
     if (next) {
         next->status = TStatus::Running;
@@ -298,12 +314,15 @@ void schedule_async() {
         // the running thread keeps the CPU until its next SVC unless it is told to give way
         Thread *best = best_ready();
         if (best && best->priority < running->priority) rt_preempt_flag = 1;
+        else if (!deterministic() && now_ns() - running_since >= kCoreSliceNs && best_ready_other_core(running->core))
+            rt_preempt_flag = 1;
         return;
     }
     flush_deferred();
     Thread *next = best_ready();
     if (!next) return;
     running = next;
+    running_since = now_ns();
     next->status = TStatus::Running;
     next->cv.notify_one();
 }
@@ -311,9 +330,23 @@ void schedule_async() {
 void reschedule(Lock &lk) {
     Thread *cur = current_thread();
     Thread *best = best_ready();
-    if (!best || best->priority >= cur->priority) return;
-    make_ready(cur, true);
-    switch_from(cur, lk);
+    if (best && best->priority < cur->priority) {
+        make_ready(cur, true);
+        switch_from(cur, lk);
+        return;
+    }
+    if (deterministic() || now_ns() - running_since < kCoreSliceNs) return;
+    Thread *other = best_ready_other_core(cur->core);
+    if (!other) return;
+    // the other core's turn: cur goes behind the ready threads of its priority and runs again when other blocks or
+    // its own slice is over
+    make_ready(cur);
+    flush_deferred();
+    running = other;
+    running_since = now_ns();
+    other->status = TStatus::Running;
+    other->cv.notify_one();
+    cur->cv.wait(lk, [&] { return running == cur; });
 }
 
 void block_current(Lock &lk) {
@@ -739,6 +772,7 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
     case 0x08: {  // CreateThread(prio=r0, entry=r1, arg=r2, stack=r3, core=r4)
         s32 prio = (s32)c->r[0];
         auto nt = create_thread(c->r[1], c->r[2], c->r[3], prio, true);
+        nt->core = (s32)c->r[4] == 1 ? 1 : 0;
         VLOG("[svc] CreateThread entry=%08x arg=%08x stack=%08x prio=%d core=%d -> id %u\n", c->r[1], c->r[2],
              c->r[3], prio, (s32)c->r[4], nt->id);
         c->r[1] = add_handle(nt);

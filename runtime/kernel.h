@@ -106,6 +106,7 @@ enum class TStatus { Ready, Running, WaitSync, WaitSleep, WaitArb, Dormant, Dead
 struct Thread : WaitObject {
     u32 id = 0;
     s32 priority = 0x30;
+    s32 core = 0;  // CreateThread's processor: 1 the system core, else the app core
     TStatus status = TStatus::Dormant;
     CPU cpu{};
     u32 tls = 0;
