@@ -31,6 +31,11 @@ is not an emulator: the game runs as a native program, rendered with Metal or Vu
 | Kirby: Triple Deluxe | EUR | `kirbytd` |
 | Kirby: Planet Robobot | all regions | `kirbypr` |
 | Captain Toad: Treasure Tracker | EUR | `captaintoad` |
+| Skylanders Spyro's Adventure | EUR | `ssa` |
+| Skylanders Giants | EUR | `giants` |
+| Skylanders SWAP Force | EUR | `sf` |
+| Skylanders Trap Team | EUR | `tt` |
+| Skylanders SuperChargers Racing | EUR | `scr` |
 
 All of them run at full speed with music and sound. Online play, StreetPass, SpotPass, amiibo, QR codes and the
 camera are not supported. Homebrew (`.3dsx`, devkitARM + libctru) goes through the same pipeline.
@@ -134,6 +139,16 @@ portal (a file dialog for a 1024-byte figure file, the same files the Xbox 360 S
 toys), **F6** lifts it off, and the window title names the figure on the portal. The file is only read; what the game
 writes to the figure stays in memory. For scripted runs, `SKYLANDERS_PORTAL_FIGURE` names figure files separated by
 `;`: the first goes on at the first connection, and after the game has read one and reconnects, the next.
+`SKYLANDERS_PORTAL_LOG=1` logs every packet the game sends and what it gets back.
+
+All five play with figures (the Skylanders Windows builds were tested, the Mac and Linux ones were not). Giants swaps
+its two Skylanders with the HUD button (E, or a click on the left stick). SuperChargers Racing reads a driver and then
+its vehicle through the portal tab of its select screens; a vehicle has to go on while the game asks for it.
+
+Scripted input (`RECOMP_INPUT`, for testing) can wait for a screen and drive the portal: `frame:WAIT@bottom/x/y/rrggbb[/tol]:max`
+holds the script until that pixel has that colour, `frame:JUMP@bottom/x/y/rrggbb[/tol]:target` jumps when it has
+(`frame:JUMP:target` always), and `frame:PORTAL_LIFT` / `frame:PORTAL_PLACE@n` take the figure off or put on the n-th
+`SKYLANDERS_PORTAL_FIGURE` file.
 
 ## Features
 
