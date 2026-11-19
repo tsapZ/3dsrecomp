@@ -1113,10 +1113,13 @@ static void draw_panel(SDL_Renderer *r, SDL_Texture *t, const SDL_FRect &top, co
 // JUMP items set the clock instead: "frame:JUMP@<top|bottom>/x/y/rrggbb[/tolerance]:target" when the clock reaches frame
 // and the pixel has that colour, "frame:JUMP:target" always. With them a script loops until a screen shows up: press A,
 // jump ahead when the screen is there, else jump back to the A ("[input] JUMP" on stderr when a conditional one jumps).
-// Without WAITs and JUMPs the clock is the host's frame count, as before.
+// Without WAITs and JUMPs the clock is the host's frame count, as before. "frame:PORTAL_LIFT" takes the figure off the
+// emulated Skylanders portal, "frame:PORTAL_PLACE@n" puts on the n-th file of SKYLANDERS_PORTAL_FIGURE (from 0): toys on
+// the same clock as the input (SuperChargers Racing took a vehicle only when it went on while the game asked for it).
 struct ScriptWait { u64 frame, max; int screen, x, y, tol; u32 rgb; bool always = false; };  // (a JUMP: max = target)
 static std::vector<ScriptWait> script_waits;  // in frame order
 static std::vector<ScriptWait> script_jumps;
+static std::vector<std::pair<u64, std::string>> script_portal;  // (frame, figure file; "" lifts)
 static size_t wait_next = 0;
 static u64 wait_since = 0;
 static u64 script_now = 0;       // the script's clock
@@ -1156,6 +1159,14 @@ static void advance_script_clock() {
         while (wait_next < script_waits.size() && script_waits[wait_next].frame <= script_now) wait_next++;
         wait_since = 0;
         break;
+    }
+    // the portal's items on the same clock
+    for (const auto &[frame, path] : script_portal) {
+        if (frame != script_now) continue;
+        fprintf(stderr, "[input] portal at %llu: %s (host frame %llu)\n", (unsigned long long)frame,
+                path.empty() ? "lift" : path.c_str(), (unsigned long long)frame_count);
+        if (path.empty()) skylanders_portal::lift();
+        else skylanders_portal::place(path);
     }
 }
 
@@ -1330,6 +1341,21 @@ static void parse_script() {
             script_waits.push_back(w);
             std::stable_sort(script_waits.begin(), script_waits.end(),
                              [](const ScriptWait &a, const ScriptWait &c) { return a.frame < c.frame; });
+            continue;
+        }
+        if (n == "PORTAL_LIFT") {
+            script_portal.emplace_back(f, "");
+            continue;
+        }
+        if (n.rfind("PORTAL_PLACE@", 0) == 0) {
+            const char *env = getenv("SKYLANDERS_PORTAL_FIGURE");
+            std::string files = env ? env : "", path;
+            for (int i = 0, want = atoi(n.c_str() + 13); i <= want; i++) {
+                const size_t semi = files.find(';');
+                path = files.substr(0, semi);
+                files = semi == std::string::npos ? "" : files.substr(semi + 1);
+            }
+            if (!path.empty()) script_portal.emplace_back(f, path);
             continue;
         }
         if (n == "JUMP" || n.rfind("JUMP@", 0) == 0) {
