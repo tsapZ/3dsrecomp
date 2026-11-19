@@ -7,7 +7,9 @@
 // The figure: a 1024-byte figure file (the same files as the Xbox 360 ports use), read once and never written back
 // (what the game writes stays in memory). SKYLANDERS_PORTAL_FIGURE names figure files separated by ';': the first goes
 // on at the first connection, and after the game has read one and reconnects, the next. place() and lift() change it
-// while the game runs.
+// while the game runs. SKYLANDERS_PORTAL_SCRIPT times toys for scripted runs: "<seconds>:lift" or "<seconds>:place
+// <file>", separated by ';', in seconds since the program started (SuperChargers Racing takes a vehicle only when it is
+// put on while the game asks for it).
 #pragma once
 #include <functional>
 #include <string>

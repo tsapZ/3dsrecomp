@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -34,6 +35,13 @@ u32 packets = 0;          // from the game, this connection
 bool list_loaded = false;
 std::vector<std::string> list;  // SKYLANDERS_PORTAL_FIGURE, in order
 size_t current = 0;
+// SKYLANDERS_PORTAL_SCRIPT, for scripted runs: "<seconds>:lift" or "<seconds>:place <file>", separated by ';', in
+// seconds since the program started, each done with the first packet or connection after its time (SuperChargers
+// Racing takes a vehicle only when it is put on while the game asks for it)
+bool script_loaded = false;
+std::vector<std::pair<double, std::string>> script;
+size_t script_next = 0;
+const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 
 bool place_locked(const std::string &path) {
     // (a UTF-8 path: the file dialog's; std::filesystem opens it on Windows as well)
@@ -77,6 +85,43 @@ u8 slot_state() {
     return now;
 }
 
+// (lock held) the script's actions that are due
+void run_script_locked() {
+    if (!script_loaded) {
+        script_loaded = true;
+        const char *env = getenv("SKYLANDERS_PORTAL_SCRIPT");
+        const std::string text = env ? env : "";
+        size_t start = 0;
+        while (start < text.size()) {
+            size_t end = text.find(';', start);
+            if (end == std::string::npos) end = text.size();
+            const std::string item = text.substr(start, end - start);
+            const size_t colon = item.find(':');
+            if (colon != std::string::npos && colon > 0) {
+                std::string action = item.substr(colon + 1);
+                action.erase(0, action.find_first_not_of(' '));
+                script.emplace_back(atof(item.substr(0, colon).c_str()), action);
+            }
+            start = end + 1;
+        }
+        std::stable_sort(script.begin(), script.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    }
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    while (script_next < script.size() && script[script_next].first <= now) {
+        const std::string &action = script[script_next].second;
+        LOG("[portal] script at %.1f s: %s\n", now, action.c_str());
+        if (action == "lift") {
+            figure_on = false;
+            generation++;
+        } else if (action.rfind("place ", 0) == 0) {
+            place_locked(action.substr(6));
+        } else {
+            LOG("[portal] unknown script action '%s'\n", action.c_str());
+        }
+        script_next++;
+    }
+}
+
 }  // namespace
 
 bool place(const std::string &path) {
@@ -105,6 +150,7 @@ std::string figure_name() {
 
 void on_connect() {
     std::lock_guard<std::mutex> lk(mx);
+    run_script_locked();
     if (!list_loaded) {
         list_loaded = true;
         const char *env = getenv("SKYLANDERS_PORTAL_FIGURE");
@@ -141,6 +187,7 @@ void on_receive(const u8 *data, u32 size, const Send &send) {
     {
         std::lock_guard<std::mutex> lk(mx);
         packets++;
+        run_script_locked();
         // every packet starts with the portal light's colour (r g b), then the command
         if (size <= 3) return;
         const u8 *c = data + 3;
