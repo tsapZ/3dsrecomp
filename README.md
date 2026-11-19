@@ -10,6 +10,13 @@ is not an emulator: the game runs as a native program, rendered with Metal or Vu
 > No Nintendo files are included in this repository: no game code, no assets, no keys, no generated C. You need
 > your own dump; the game is recompiled on your machine from your own files.
 
+**About this fork** ([tsapZ/3dsrecomp](https://github.com/tsapZ/3dsrecomp), branch `windows`, from
+[nathsou/3dsrecomp](https://github.com/nathsou/3dsrecomp)): it adds a **Windows** build (MSYS2 CLANG64) and the five
+**Skylanders** 3DS games with their infrared Portal of Power, see [Building on Windows](#building-a-game) and
+[Skylanders portal](#skylanders-portal). It belongs to the
+[Skylanders: Core of Light](https://github.com/tsapZ/SkylandersCoreOfLight) project. Was AI used? Yes: the Windows
+port and the Skylanders parts were written with Claude (Claude Code) and tested on my own PC.
+
 ## Games
 
 | Game | Version | `-DGAME=` |
