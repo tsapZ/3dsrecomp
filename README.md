@@ -57,6 +57,17 @@ brew install llvm cmake ninja sdl3
 sudo pacman -S clang cmake ninja sdl3 vulkan-icd-loader vulkan-headers shaderc freetype2 harfbuzz fontconfig curl ffmpeg
 ```
 
+**Windows** (x86-64, Vulkan; [MSYS2](https://www.msys2.org/), in its CLANG64 shell):
+
+```sh
+pacman -S mingw-w64-clang-x86_64-{clang,lld,cmake,ninja,pkgconf,sdl3,freetype,harfbuzz,fontconfig,curl,shaderc,vulkan-headers,vulkan-loader,dlfcn}
+```
+
+The tools need a Windows Python 3 (python.org's; it brings the OpenSSL that `extract.py` uses for encrypted dumps).
+On Windows there is no lazy recompilation: a run that finds code the recompiler missed stops and writes the address to
+`save/missing_functions.txt`; `tools/regen.sh` folds it in, then rebuild. `RECOMP_WATCH` and thread sampling are not
+there yet.
+
 **In one step:** `python3 tools/port.py <dump> [<name>] [--app]` extracts the dump, recompiles it, builds it and,
 with `--app`, makes an app of it (each step skipped when already done; keys are looked for next to the dump, in the
 current folder and in Azahar's or Citra's `sysdata`). `--launcher` builds one program with a game list holding every
@@ -114,6 +125,15 @@ out empty folders, and Mario Kart 7 resets a save whose empty `replay_` folder i
 - **F2** cycles the screen layout (stacked, side by side, top only, …), **Tab** swaps the screens,
   **F3** cycles the internal resolution, **F11** toggles fullscreen.
 - When a game opens the system keyboard, you type with your real keyboard.
+
+## Skylanders portal
+
+The five Skylanders 3DS games (Spyro's Adventure, Giants, Swap Force, Trap Team, SuperChargers Racing) came with a
+battery Portal of Power that talks to the console over infrared. ir:USER emulates it: **F5** puts a figure on the
+portal (a file dialog for a 1024-byte figure file, the same files the Xbox 360 Skylanders ports use, from your own
+toys), **F6** lifts it off, and the window title names the figure on the portal. The file is only read; what the game
+writes to the figure stays in memory. For scripted runs, `SKYLANDERS_PORTAL_FIGURE` names figure files separated by
+`;`: the first goes on at the first connection, and after the game has read one and reconnects, the next.
 
 ## Features
 
