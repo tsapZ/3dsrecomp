@@ -1105,6 +1105,44 @@ static void draw_panel(SDL_Renderer *r, SDL_Texture *t, const SDL_FRect &top, co
     SDL_SetTextureBlendMode(t, SDL_BLENDMODE_NONE);
 }
 
+// RECOMP_INPUT's WAIT items ("frame:WAIT@<top|bottom>/x/y/rrggbb[/tolerance]:max"): the script's clock, which every
+// item's frame counts in, holds before that frame until the pixel (x, y) of that screen (the game's picture, 400x240 or
+// 320x240) has that colour, give or take the tolerance per channel (24 when left out), or max host frames went by
+// (36000 when left out). Loading times vary between runs (SuperChargers Racing: ~10000 frames), so a script that waits
+// for a screen it knows from a picture taps at the right moment. Each WAIT's outcome goes to stderr ("[input] WAIT").
+// Without WAITs the clock is the host's frame count, as before.
+struct ScriptWait { u64 frame, max; int screen, x, y, tol; u32 rgb; };
+static std::vector<ScriptWait> script_waits;  // in frame order
+static size_t wait_next = 0;
+static u64 wait_since = 0;
+static u64 script_now = 0;       // the script's clock
+static bool script_tick = true;  // it moved this frame (one-shot items fire only then)
+static bool wait_met(const ScriptWait &w) {
+    static u32 px[400 * 240];
+    const int width = w.screen ? 320 : 400;
+    if (w.x < 0 || w.y < 0 || w.x >= width || w.y >= 240) return false;
+    convert_fb(kernel::gsp_framebuffer(w.screen), width, px);
+    const u32 c = px[w.y * width + w.x];  // r in the low byte (write_ppm)
+    const int r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+    const int wr = (w.rgb >> 16) & 0xFF, wg = (w.rgb >> 8) & 0xFF, wb = w.rgb & 0xFF;
+    return abs(r - wr) <= w.tol && abs(g - wg) <= w.tol && abs(b - wb) <= w.tol;
+}
+static void advance_script_clock() {
+    script_tick = false;
+    while (wait_next < script_waits.size() && script_now + 1 >= script_waits[wait_next].frame) {
+        const ScriptWait &w = script_waits[wait_next];
+        if (!wait_since) wait_since = frame_count;
+        const bool met = wait_met(w);
+        if (!met && frame_count - wait_since < w.max) return;  // hold
+        fprintf(stderr, "[input] WAIT at %llu: %s after %llu frames (host frame %llu)\n", (unsigned long long)w.frame,
+                met ? "met" : "TIMEOUT", (unsigned long long)(frame_count - wait_since), (unsigned long long)frame_count);
+        wait_next++;
+        wait_since = 0;
+    }
+    script_now++;
+    script_tick = true;
+}
+
 // a screenshot is due at frame n (RECOMP_SHOT / RECOMP_WINSHOT)
 static bool shot_due(u64 n) {
     static const char *winshot = getenv("RECOMP_WINSHOT");
@@ -1120,6 +1158,7 @@ static void present() {
     if (g_settings.speed > 100 && t - last_drawn < milliseconds(12) && !shot_due(frame_count + 1)) {
         frame_count++;
         g_frame = frame_count;
+        advance_script_clock();
         return;
     }
     last_drawn = t;
@@ -1207,6 +1246,7 @@ static void present() {
     present_renderer(renderer);
     frame_count++;
     g_frame = frame_count;
+    advance_script_clock();
     if (shot_frame && frame_count >= shot_from && frame_count % shot_frame == 0) {
         convert_fb(kernel::gsp_framebuffer(0), 400, top);
         convert_fb(kernel::gsp_framebuffer(1), 320, bottom);
@@ -1234,7 +1274,8 @@ static void present() {
 }
 
 // scripted input for testing: RECOMP_INPUT="frame:BUTTONS:duration,..." (BUTTONS like A+START; T@x/y touches
-// the bottom screen at pixel x, y; RSUP, RSDOWN, RSLEFT, RSRIGHT push the right stick)
+// the bottom screen at pixel x, y; RSUP, RSDOWN, RSLEFT, RSRIGHT push the right stick; WAIT@... holds the script's
+// clock, see advance_script_clock)
 struct ScriptEntry { u64 frame, dur; u32 buttons; int cx, cy, tx = -1, ty = -1; float rsx = 0, rsy = 0; };
 // host keys for testing the menu: "frame:KEY_<SDL key name>" (KEY_Escape, KEY_Down, KEY_Return...), typed text
 // ("frame:TEXT_<text>", for the software keyboard, or taps on the game's own keyboard from the profile's keys), the mouse in layout coordinates: "frame:MOUSE_DOWN@x/y"
@@ -1261,9 +1302,20 @@ static void parse_script() {
         pos = e == std::string::npos ? str.size() : e + 1;
         unsigned long long f = 0, d = 1;
         char names[128] = {};
-        if (sscanf(item.c_str(), "%llu:%127[^:]:%llu", &f, names, &d) < 2) continue;
+        const int got = sscanf(item.c_str(), "%llu:%127[^:]:%llu", &f, names, &d);
+        if (got < 2) continue;
         u32 b = 0;
         std::string n = names;
+        if (n.rfind("WAIT@", 0) == 0) {
+            char scr[16] = {};
+            ScriptWait w{f, got == 3 ? d : 36000, 0, 0, 0, 24, 0};
+            if (sscanf(n.c_str() + 5, "%15[^/]/%d/%d/%x/%d", scr, &w.x, &w.y, &w.rgb, &w.tol) < 4) continue;
+            w.screen = std::string(scr) == "bottom" ? 1 : 0;
+            script_waits.push_back(w);
+            std::stable_sort(script_waits.begin(), script_waits.end(),
+                             [](const ScriptWait &a, const ScriptWait &c) { return a.frame < c.frame; });
+            continue;
+        }
         if (n.rfind("KEY_", 0) == 0) {
             script_keys.push_back({f, SDL_GetScancodeFromName(n.c_str() + 4)});
             continue;
@@ -1345,7 +1397,7 @@ static u32 host_input(float &rsx, float &rsy) {
     if (h & H_RSLEFT) rsx = -1;
     if (h & H_RSRIGHT) rsx = 1;
     for (auto &e : script)
-        if (frame_count >= e.frame && frame_count < e.frame + e.dur) {
+        if (script_now >= e.frame && script_now < e.frame + e.dur) {
             if (e.rsx) rsx = e.rsx;
             if (e.rsy) rsy = e.rsy;
         }
@@ -1494,7 +1546,7 @@ static void poll_input_devices(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 
         }
     }
     for (auto &e : script)
-        if (frame_count >= e.frame && frame_count < e.frame + e.dur) {
+        if (script_now >= e.frame && script_now < e.frame + e.dur) {
             buttons |= e.buttons;
             if (e.cx) cx = (s16)e.cx;
             if (e.cy) cy = (s16)e.cy;
@@ -1504,7 +1556,7 @@ static void poll_input_devices(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 
     SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
     touch = false;
     for (auto &e : script)
-        if (e.tx >= 0 && frame_count >= e.frame && frame_count < e.frame + e.dur) {
+        if (e.tx >= 0 && script_now >= e.frame && script_now < e.frame + e.dur) {
             touch = true;
             tx = (u16)std::clamp(e.tx, 0, 319);
             ty = (u16)std::clamp(e.ty, 0, 239);
@@ -1694,7 +1746,7 @@ void frontend_run() {
             live_keys.clear();
         }
         for (auto &k : script_keys)
-            if (k.frame == frame_count && k.finger) {
+            if (script_tick && k.frame == script_now && k.finger) {
                 int ww, wh;
                 SDL_GetWindowSize(window, &ww, &wh);
                 SDL_Event fe{};
@@ -1705,7 +1757,7 @@ void frontend_run() {
                 fe.tfinger.y = k.y / wh;
                 fe.tfinger.windowID = SDL_GetWindowID(window);
                 SDL_PushEvent(&fe);
-            } else if (k.frame == frame_count && k.mouse) {
+            } else if (script_tick && k.frame == script_now && k.mouse) {
                 float wx, wy;
                 SDL_RenderCoordinatesToWindow(renderer, k.x, k.y, &wx, &wy);
                 SDL_Event me{};
@@ -1727,15 +1779,15 @@ void frontend_run() {
                     me.button.y = wy;
                 }
                 SDL_PushEvent(&me);
-            } else if (k.frame == frame_count && !k.text.empty() && !typing && !menu::keyboard_open()) {
+            } else if (script_tick && k.frame == script_now && !k.text.empty() && !typing && !menu::keyboard_open()) {
                 type_text(k.text);  // a test knows the game's own keyboard is up, with or without a "keyboard" rule
-            } else if (k.frame == frame_count && !k.text.empty()) {
+            } else if (script_tick && k.frame == script_now && !k.text.empty()) {
                 SDL_Event te{};
                 te.type = SDL_EVENT_TEXT_INPUT;
                 te.text.windowID = SDL_GetWindowID(window);
                 te.text.text = k.text.c_str();
                 SDL_PushEvent(&te);
-            } else if (k.frame == frame_count) {
+            } else if (script_tick && k.frame == script_now) {
                 SDL_Event ke{};
                 ke.type = SDL_EVENT_KEY_DOWN;
                 ke.key.scancode = k.key;
