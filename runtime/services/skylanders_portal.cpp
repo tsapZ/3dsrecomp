@@ -5,6 +5,9 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 
 namespace skylanders_portal {
@@ -16,6 +19,7 @@ constexpr int kAddedReports = 8;
 std::mutex mx;
 std::array<u8, 1024> figure{};
 bool figure_on = false;
+std::string figure_file;  // (UTF-8)
 u32 generation = 0;  // changes with every place / lift, so the device tells the game
 
 // the device's state for the current connection
@@ -32,21 +36,20 @@ std::vector<std::string> list;  // SKYLANDERS_PORTAL_FIGURE, in order
 size_t current = 0;
 
 bool place_locked(const std::string &path) {
-    FILE *f = fopen(path.c_str(), "rb");
-    if (!f) {
+    // (a UTF-8 path: the file dialog's; std::filesystem opens it on Windows as well)
+    std::ifstream in(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
+    if (!in) {
         LOG("[portal] cannot open figure file %s\n", path.c_str());
         return false;
     }
-    std::array<u8, 1024> d{};
-    const size_t n = fread(d.data(), 1, d.size(), f);
-    const bool more = fgetc(f) != EOF;
-    fclose(f);
-    if (n != d.size() || more) {
+    const std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    if (bytes.size() != figure.size()) {
         LOG("[portal] %s is not a 1024-byte figure file\n", path.c_str());
         return false;
     }
-    figure = d;
+    std::copy(bytes.begin(), bytes.end(), figure.begin());
     figure_on = true;
+    figure_file = path;
     generation++;
     LOG("[portal] figure on the portal: %s\n", path.c_str());
     return true;
@@ -91,6 +94,13 @@ void lift() {
 bool present() {
     std::lock_guard<std::mutex> lk(mx);
     return figure_on;
+}
+
+std::string figure_name() {
+    std::lock_guard<std::mutex> lk(mx);
+    if (!figure_on) return "";
+    const auto p = std::filesystem::path(std::u8string(figure_file.begin(), figure_file.end())).stem().u8string();
+    return std::string(p.begin(), p.end());
 }
 
 void on_connect() {

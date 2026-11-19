@@ -31,6 +31,7 @@
 #include "profile.h"
 #include "menu.h"
 #include "services/services.h"
+#include "services/skylanders_portal.h"
 #include "settings.h"
 #include "stacks.h"
 #include "touch.h"
@@ -1846,6 +1847,22 @@ void frontend_run() {
                 SDL_RenderCoordinatesFromWindow(renderer, ev.button.x, ev.button.y, &lx, &ly);
                 if (onescreen::click(lx, ly)) continue;
             }
+            if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_F5) {
+                // a figure file onto the Skylanders portal (the same 1024-byte files as the Xbox 360 ports use);
+                // the dialog starts in Documents\Skylanders\Figures when it is there
+                static const SDL_DialogFileFilter filters[] = {{"Skylanders figure", "dump;bin;sky"}, {"All files", "*"}};
+                static std::string start;
+                if (start.empty())
+                    if (const char *docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS))
+                        start = std::string(docs) + "Skylanders/Figures";
+                SDL_ShowOpenFileDialog(
+                    [](void *, const char *const *files, int) {
+                        if (files && files[0]) skylanders_portal::place(files[0]);
+                    },
+                    nullptr, window, filters, 2, start.c_str(), false);
+            }
+            if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat && ev.key.scancode == SDL_SCANCODE_F6)
+                skylanders_portal::lift();
             if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.scancode == SDL_SCANCODE_F3) {
                 cycle_scale();
                 g_settings.scale = scale_mode > 0 ? scale_mode : 0;
@@ -1858,6 +1875,12 @@ void frontend_run() {
             }
         }
         if (touch::take_menu()) menu::toggle();
+        // the Skylanders portal's figure in the window title (F5 puts one on, F6 lifts it)
+        if (static std::string shown = "\x01"; skylanders_portal::figure_name() != shown) {
+            shown = skylanders_portal::figure_name();
+            SDL_SetWindowTitle(window, (g_game.name + (shown.empty() ? std::string(" - portal: empty (F5 places a figure)")
+                                                                    : " - portal: " + shown + " (F6 lifts it)")).c_str());
+        }
         if (touch::take_swap()) swap_screens();
         update_auto_scale();
         menu::update();
