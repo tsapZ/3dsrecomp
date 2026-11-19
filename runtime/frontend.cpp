@@ -1110,9 +1110,13 @@ static void draw_panel(SDL_Renderer *r, SDL_Texture *t, const SDL_FRect &top, co
 // 320x240) has that colour, give or take the tolerance per channel (24 when left out), or max host frames went by
 // (36000 when left out). Loading times vary between runs (SuperChargers Racing: ~10000 frames), so a script that waits
 // for a screen it knows from a picture taps at the right moment. Each WAIT's outcome goes to stderr ("[input] WAIT").
-// Without WAITs the clock is the host's frame count, as before.
-struct ScriptWait { u64 frame, max; int screen, x, y, tol; u32 rgb; };
+// JUMP items set the clock instead: "frame:JUMP@<top|bottom>/x/y/rrggbb[/tolerance]:target" when the clock reaches frame
+// and the pixel has that colour, "frame:JUMP:target" always. With them a script loops until a screen shows up: press A,
+// jump ahead when the screen is there, else jump back to the A ("[input] JUMP" on stderr when a conditional one jumps).
+// Without WAITs and JUMPs the clock is the host's frame count, as before.
+struct ScriptWait { u64 frame, max; int screen, x, y, tol; u32 rgb; bool always = false; };  // (a JUMP: max = target)
 static std::vector<ScriptWait> script_waits;  // in frame order
+static std::vector<ScriptWait> script_jumps;
 static size_t wait_next = 0;
 static u64 wait_since = 0;
 static u64 script_now = 0;       // the script's clock
@@ -1141,6 +1145,18 @@ static void advance_script_clock() {
     }
     script_now++;
     script_tick = true;
+    for (const ScriptWait &j : script_jumps) {
+        if (j.frame != script_now || !(j.always || wait_met(j))) continue;
+        if (!j.always)
+            fprintf(stderr, "[input] JUMP at %llu to %llu (host frame %llu)\n", (unsigned long long)j.frame,
+                    (unsigned long long)j.max, (unsigned long long)frame_count);
+        script_now = j.max;
+        // the WAITs still ahead of the new time
+        wait_next = 0;
+        while (wait_next < script_waits.size() && script_waits[wait_next].frame <= script_now) wait_next++;
+        wait_since = 0;
+        break;
+    }
 }
 
 // a screenshot is due at frame n (RECOMP_SHOT / RECOMP_WINSHOT)
@@ -1314,6 +1330,17 @@ static void parse_script() {
             script_waits.push_back(w);
             std::stable_sort(script_waits.begin(), script_waits.end(),
                              [](const ScriptWait &a, const ScriptWait &c) { return a.frame < c.frame; });
+            continue;
+        }
+        if (n == "JUMP" || n.rfind("JUMP@", 0) == 0) {
+            if (got < 3) continue;  // (no target)
+            ScriptWait j{f, d, 0, 0, 0, 24, 0, n == "JUMP"};
+            if (!j.always) {
+                char scr[16] = {};
+                if (sscanf(n.c_str() + 5, "%15[^/]/%d/%d/%x/%d", scr, &j.x, &j.y, &j.rgb, &j.tol) < 4) continue;
+                j.screen = std::string(scr) == "bottom" ? 1 : 0;
+            }
+            script_jumps.push_back(j);
             continue;
         }
         if (n.rfind("KEY_", 0) == 0) {
