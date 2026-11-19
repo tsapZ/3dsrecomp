@@ -193,6 +193,10 @@ void on_receive(const u8 *data, u32 size, const Send &send) {
         const u8 *c = data + 3;
         const u32 n = size - 3;
         switch (c[0]) {
+        case 'J':  // a light fade on one side (Trap Team portals): acknowledged with a bare 4A, as skylanders-portal's
+                   // SoftwarePortal does (SuperChargers Racing sends one pair every 3 s while it waits for a Skylander)
+            reply = {0x4a};
+            break;
         case 'R':  // ready: a Trap Team portal, as the USB ones answer
             reply = {0x52, 0x02, 0x1b};
             break;
@@ -237,7 +241,22 @@ void on_receive(const u8 *data, u32 size, const Send &send) {
             break;
         }
         default:  // C (the light) and the rest: no answer
+            if (getenv("SKYLANDERS_PORTAL_LOG")) {
+                char in[16] = {};
+                for (u32 i = 1; i < n && i < 5; i++) snprintf(in + (i - 1) * 3, 4, "%02x ", c[i]);
+                LOG("[portal] %c (%02x) %s(%u bytes, no answer)\n", c[0] >= 0x20 && c[0] < 0x7f ? c[0] : '?', c[0], in,
+                    size);
+            }
             return;
+        }
+        // SKYLANDERS_PORTAL_LOG: what the game asks and gets, every packet (the light and other commands without an
+        // answer above), to see what a game does with a figure
+        static const bool trace = getenv("SKYLANDERS_PORTAL_LOG") != nullptr;
+        if (trace) {  // (all of them: a game sends a few a second)
+            char in[16] = {}, out[16] = {};
+            for (u32 i = 1; i < n && i < 5; i++) snprintf(in + (i - 1) * 3, 4, "%02x ", c[i]);
+            for (size_t i = 1; i < reply.size() && i < 5; i++) snprintf(out + (i - 1) * 3, 4, "%02x ", reply[i]);
+            LOG("[portal] %c %s-> %s(%s)\n", c[0], in, out, figure_on ? "figure on" : "empty");
         }
     }
     send(reply);
