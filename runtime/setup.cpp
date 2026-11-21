@@ -532,11 +532,17 @@ int run(int argc, char **argv) {
     const uint64_t exefs_off = u32(&nh[0x1A0]) * MU, exefs_size = u32(&nh[0x1A4]) * MU;
     const uint64_t romfs_off = u32(&nh[0x1B0]) * MU, romfs_size = u32(&nh[0x1B4]) * MU;
 
-    std::error_code ec;
-    fs::create_directories(fs::path(out) / "exefs", ec);
-    if (ec) fail("cannot make " + out);
     const Bytes exheader = ncch->pread(ncch_off + 0x200, 0x800);
     if (exheader.size() != 0x800) fail("short exheader");
+#ifdef RECOMP_TITLE_ID
+    // this executable runs one title's recompiled code: another game's dump, or another region's (other code), can't
+    if (hex64(u64(&exheader[0x200])) != RECOMP_TITLE_ID)
+        fail("this dump is " + json_text(&exheader[0], 8) + " (" + hex64(u64(&exheader[0x200])) +
+             "); this program was made for the title " + RECOMP_TITLE_ID + ", a dump of that one is needed");
+#endif
+    std::error_code ec;
+    fs::create_directories(fs::path(out) / "exefs", ec);  // (only once the dump is the right one)
+    if (ec) fail("cannot make " + out);
     write_file(fs::path(out) / "exheader.bin", exheader.data(), exheader.size());
 
     const Bytes exefs = ncch->pread(ncch_off + exefs_off, exefs_size);
