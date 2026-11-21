@@ -7,6 +7,7 @@
 #include <shlobj.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -35,6 +36,9 @@ std::string exe_path() {
 }
 
 std::string app_data_dir() {
+    // RECOMP_SAVE_DIR: another folder for a packaged game's saves and settings (scripted tests keep theirs in the run's
+    // own folder, away from a player's %APPDATA%\3dsrecomp)
+    if (const char *d = getenv("RECOMP_SAVE_DIR"); d && *d) return slashes(d);
     wchar_t *path = nullptr;
     std::string out;
     if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &path) == S_OK) out = slashes(utf8(path));
