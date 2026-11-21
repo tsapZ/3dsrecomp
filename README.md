@@ -17,6 +17,11 @@ is not an emulator: the game runs as a native program, rendered with Metal or Vu
 [Skylanders: Core of Light](https://github.com/tsapZ/SkylandersCoreOfLight) project. Was AI used? Yes: the Windows
 port and the Skylanders parts were written with Claude (Claude Code) and tested on my own PC.
 
+**Ready-made Windows packages** of the five Skylanders games are on the
+[releases page](https://github.com/tsapZ/3dsrecomp/releases). No game files come with them: unzip one, run
+`<game>.exe --setup "<your dump>"` once (it makes them from your own dump of the cartridge), then start the exe.
+European cartridges only for now.
+
 ## Games
 
 | Game | Version | `-DGAME=` |
