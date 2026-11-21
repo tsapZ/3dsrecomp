@@ -45,8 +45,12 @@ for f in pipelines.bin profile.txt; do [ -f "games/$TID/$f" ] && cp -L "games/$T
 cat > "$OUT/README.txt" <<README
 $APP for Windows, recompiled with tsapZ/3dsrecomp (https://github.com/tsapZ/3dsrecomp, EUPL-1.2).
 
-No game files come with it. Put your own dump's files into resources\\game: exheader.bin, code.bin, romfs.bin and
-info.json, as tools/extract.py writes them from your own .3ds / .cci / .cia. Then start $N.exe.
+No game files come with it: they come from your own dump of the game (.3ds, .cci, .cxi or .cia), once:
+
+    $N.exe --setup "<your dump>"
+
+That writes them into resources\\game. An encrypted dump needs your own console's keys: boot9.bin (and for a .cia
+aes_keys.txt, for some titles seeddb.bin) next to the dump, or pass --boot9 / --keys / --seeddb. Then start $N.exe.
 Figures: F5 puts a figure file on the portal, F6 lifts it off. The licences of the libraries are in licenses\\.
 Not affiliated with Activision or Nintendo.
 README

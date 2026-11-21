@@ -23,6 +23,9 @@
 #include <fstream>
 
 #include "launcher.h"
+#if !defined(__APPLE__)
+#include "setup.h"
+#endif
 
 std::string g_save_base = "save";
 char **g_argv;  // for restarting the game from the menu
@@ -81,6 +84,10 @@ static void fatal_dialog(const char *msg) {
 int main(int argc, char **argv) {
     g_argv = argv;
     if (argc > 1 && std::string(argv[1]) == "--emit-shaders") return gpu::emit_shaders(argc - 2, argv + 2);
+#if !defined(__APPLE__)
+    // the game files from the player's own dump (runtime/setup.h), for the Windows packages that ship none
+    if (argc > 1 && std::string(argv[1]) == "--setup") return setup::run(argc - 2, argv + 2);
+#endif
     std::string dir = "data/" RECOMP_GAME;
     bool bundle = false;
     // inside an app bundle: game files in Contents/Resources/game (macOS), game/ next to the executable (iOS) or
