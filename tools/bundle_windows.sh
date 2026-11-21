@@ -15,6 +15,8 @@ OUT="$B/$APP"
 rm -rf "$OUT" "$B/$APP.zip"
 mkdir -p "$OUT/licenses" "$OUT/resources/game"
 cp "$B/$N.exe" "$OUT/"
+# without its debug info: a third of the size, and that info names the build folder in every lambda's type
+llvm-strip "$OUT/$N.exe"
 # the DLLs from clang64 (the system's own stay out), and the packages they come from
 PKGS=""
 for dll in $(ldd "$B/$N.exe" | sed -n 's/.*=> \(\/clang64\/[^ ]*\.dll\) .*/\1/p' | sort -u); do
@@ -49,11 +51,25 @@ No game files come with it: they come from your own dump of the game (.3ds, .cci
 
     $N.exe --setup "<your dump>"
 
-That writes them into resources\\game. An encrypted dump needs your own console's keys: boot9.bin (and for a .cia
-aes_keys.txt, for some titles seeddb.bin) next to the dump, or pass --boot9 / --keys / --seeddb. Then start $N.exe.
+That writes them into resources\\game. It has to be the edition this was made from (title $TID); a dump of
+another one is refused. An encrypted dump needs your own console's keys: boot9.bin (and for a .cia aes_keys.txt, for
+some titles seeddb.bin) next to the dump, or pass --boot9 / --keys / --seeddb. Then start $N.exe.
+Saves go to %APPDATA%\\3dsrecomp, or to the folder given with --save-dir=<folder>.
 Figures: F5 puts a figure file on the portal, F6 lifts it off. The licences of the libraries are in licenses\\.
 Not affiliated with Activision or Nintendo.
 README
+# nothing that ships may name the build machine: the source folder (both spellings) or the user's name
+SRC_W=$(pwd -W 2>/dev/null || pwd)
+WHO=${USERNAME:-$USER}
+LEAK=""
+for f in "$OUT"/*.exe "$OUT"/*.dll; do
+  grep -a -q -i -F -e "$(pwd)" -e "$SRC_W" ${WHO:+-e "$WHO"} "$f" && LEAK="$LEAK $(basename "$f")"
+done
+if [ -n "$LEAK" ]; then
+  echo "not packaged, build machine paths in:$LEAK"
+  rm -rf "$OUT"
+  exit 1
+fi
 ( cd "$B" && zip -qr "$APP.zip" "$APP" ) 2>/dev/null || powershell.exe -NoProfile -Command "Compress-Archive -Path '$(cygpath -w "$OUT")' -DestinationPath '$(cygpath -w "$B/$APP.zip")'"
 echo "built $OUT ($(ls "$OUT"/*.dll | wc -l) DLLs, $(du -sh "$OUT" | cut -f1))"
 [ -f "$OUT/licenses/MISSING.txt" ] && cat "$OUT/licenses/MISSING.txt"

@@ -1148,7 +1148,8 @@ bool load() {
     else {
         char tid[20];
         snprintf(tid, sizeof tid, "%016llx", (unsigned long long)g_game.program_id);
-        for (const auto &p : {g_game.dir + "/profile.txt", std::string(RECOMP_SOURCE_DIR) + "/games/" + tid + "/profile.txt"})
+        for (const auto &p : {g_game.dir + "/profile.txt",
+                              g_source_dir.empty() ? std::string() : g_source_dir + "/games/" + tid + "/profile.txt"})
             if (FILE *f = fopen(p.c_str(), "r")) {
                 fclose(f);
                 path = p;

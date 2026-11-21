@@ -28,6 +28,7 @@
 #endif
 
 std::string g_save_base = "save";
+std::string g_source_dir;  // (rt.h)
 char **g_argv;  // for restarting the game from the menu
 std::string g_start_game;  // (multi-game app) the game playing, which a restart goes straight back to
 
@@ -112,6 +113,16 @@ int main(int argc, char **argv) {
             dir = (res / "game").string();
             bundle = true;
             g_save_base = app_support;
+        }
+#endif
+#ifdef RECOMP_SOURCE_REL
+        // a build folder's executable: the source tree from where it is, for the per-game files a build folder doesn't
+        // have (games/<title id>/, system_archives/); a package has those with it, and holds no build machine path
+        std::error_code src_ec;
+        if (!bundle && !std::filesystem::is_directory(res / "game", src_ec) && !std::filesystem::is_directory(res / "games", src_ec)) {
+            std::string s = (exe_dir / RECOMP_SOURCE_REL).lexically_normal().generic_string();
+            while (s.size() > 1 && s.back() == '/') s.pop_back();
+            g_source_dir = s;
         }
 #endif
     }

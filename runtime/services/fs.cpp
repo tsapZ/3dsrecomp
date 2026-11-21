@@ -134,11 +134,9 @@ struct Archive {
 static std::string system_archive_path(u64 tid) {
     char name[64];
     snprintf(name, sizeof name, "%016llx.romfs", (unsigned long long)tid);
-    for (std::string dir : {g_game.dir + "/../system_archives/", g_game.dir + "/system_archives/", std::string("system_archives/")
-#ifdef RECOMP_SOURCE_DIR
-                            , std::string(RECOMP_SOURCE_DIR "/system_archives/")
-#endif
-         }) {
+    std::vector<std::string> dirs = {g_game.dir + "/../system_archives/", g_game.dir + "/system_archives/", "system_archives/"};
+    if (!g_source_dir.empty()) dirs.push_back(g_source_dir + "/system_archives/");
+    for (const std::string &dir : dirs) {
         if (fsys::exists(dir + name)) return dir + name;
     }
     return "";

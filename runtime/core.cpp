@@ -208,8 +208,9 @@ static const GuestEntry *lazy_lookup(u32 addr) {
 }
 
 static bool lazy_compile(u32 addr) {
-#if defined(RECOMP_SOURCE_DIR) && !TARGET_OS_IOS && !defined(RECOMP_MODULES) && !defined(_WIN32)  // (iOS has no compiler to run)
-    std::string root = RECOMP_SOURCE_DIR;
+#if defined(RECOMP_SOURCE_REL) && !TARGET_OS_IOS && !defined(RECOMP_MODULES) && !defined(_WIN32)  // (iOS has no compiler to run)
+    std::string root = g_source_dir;
+    if (root.empty()) return false;  // (a package: no source tree)
     std::string game = RECOMP_GAME;
     char gamedir[4096];
     if (!realpath(g_game.dir.c_str(), gamedir)) return false;

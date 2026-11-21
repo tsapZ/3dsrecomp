@@ -168,8 +168,9 @@ std::string title_id_hex() {
 ShaderList load_shader_list(const char *file, const char *user_ext, u32 magic, u32 version) {
     ShaderList l;
     const std::string tid = title_id_hex();
-    for (const auto &p : {g_game.dir + "/" + file, std::string(RECOMP_SOURCE_DIR) + "/games/" + tid + "/" + file}) {
-        if (!std::filesystem::exists(p)) continue;
+    for (const auto &p : {g_game.dir + "/" + file,
+                          g_source_dir.empty() ? std::string() : g_source_dir + "/games/" + tid + "/" + file}) {
+        if (p.empty() || !std::filesystem::exists(p)) continue;
         l.items = read_blobs(p, magic, version);
         l.shipped_path = p;
         break;

@@ -14,6 +14,9 @@ struct GameInfo {
     int region = -1;  // from the SMDH region lockout: 0 JPN, 1 USA, 2 EUR, 3 AUS, 4 CHN, 5 KOR, 6 TWN; -1 region free
 };
 extern GameInfo g_game;
+// The source tree for an executable in a build folder (its games/<title id>/ and system_archives/), found from the
+// executable at start (runtime/main.cpp); empty in a package, which has its files with it.
+extern std::string g_source_dir;
 
 void load_game(const std::string &dir);
 std::string smdh_title(const std::string &path);  // an SMDH's English (else Japanese) short title, as UTF-8
