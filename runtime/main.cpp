@@ -119,6 +119,9 @@ int main(int argc, char **argv) {
         std::string a = argv[i];
         if (a == "-v") g_verbose = 1;
         else if (a == "-vv") g_verbose = 2;
+        // --save-dir=<folder>: the saves and settings somewhere else (a launcher keeps each game's in its own
+        // folder; the packaged default is the app data folder)
+        else if (a.rfind("--save-dir=", 0) == 0) g_save_base = a.substr(11);
         else dir = a;
     }
     if (const char *v = getenv("RECOMP_VERBOSE")) g_verbose = atoi(v);
