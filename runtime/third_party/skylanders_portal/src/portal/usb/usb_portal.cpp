@@ -1,0 +1,671 @@
+#include "portal/usb/usb_portal.h"
+
+#include "portal/figure_crypto.h"
+#include "portal/old_portal_light.h"
+#include "portal/usb/winusb_portal_io.h"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <deque>
+#include <string_view>
+
+#include <rex/logging.h>
+#include <rex/string/utf8.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <setupapi.h>
+#pragma comment(lib, "setupapi.lib")
+#endif
+
+namespace skylanders::portal {
+
+namespace {
+
+
+// hid_error() returns a wide string whose encoding matches Windows UTF-16 (wchar_t is 16-bit) or
+// POSIX UTF-32 (wchar_t is 32-bit) -- narrow it for REXLOG, which expects UTF-8.
+std::string HidErrorUtf8(hid_device* device) {
+  const wchar_t* message = hid_error(device);
+  if (message == nullptr) return "(no error message)";
+  if constexpr (sizeof(wchar_t) == 2) {
+    return rex::string::to_utf8(std::u16string_view(reinterpret_cast<const char16_t*>(message)));
+  } else {
+    std::string out;
+    for (const wchar_t* p = message; *p != 0; ++p) {
+      uint32_t cp = static_cast<uint32_t>(*p);
+      if (cp >= 0xD800 && cp <= 0xDFFF || cp > 0x10FFFF) cp = 0xFFFD;
+      if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+      } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      }
+    }
+    return out;
+  }
+}
+
+#ifdef _WIN32
+std::string WideUtf8(const wchar_t* text) {
+  return rex::string::to_utf8(std::u16string_view(reinterpret_cast<const char16_t*>(text)));
+}
+
+// Every present USB device of the portals' maker (vendor 1430) with the driver Windows gave it, once
+// per run: a HID portal (the Wii U and PS3 ones) has HidUsb, which the USB mode opens; an Xbox 360
+// portal usually gets the Xbox controller driver (xusb22) and, after Zadig, WinUSB or libusbK, none
+// of which is a HID device (TrapTeamRecomp #19; Xenia talks to the Xbox 360 portal over WinUSB, its
+// commands start with 0B 14). Hardware ids and driver names only, nothing about the user.
+void LogPortalDrivers() {
+  HDEVINFO set = SetupDiGetClassDevsW(nullptr, L"USB", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+  if (set == INVALID_HANDLE_VALUE) return;
+  SP_DEVINFO_DATA info{};
+  info.cbSize = sizeof(info);
+  int found = 0;
+  for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &info); ++i) {
+    wchar_t ids[512] = {};
+    if (!SetupDiGetDeviceRegistryPropertyW(set, &info, SPDRP_HARDWAREID, nullptr, reinterpret_cast<PBYTE>(ids),
+                                           sizeof(ids) - 2 * sizeof(wchar_t), nullptr) ||
+        wcsstr(ids, L"VID_1430") == nullptr) {
+      continue;
+    }
+    wchar_t service[128] = {};
+    wchar_t description[256] = {};
+    SetupDiGetDeviceRegistryPropertyW(set, &info, SPDRP_SERVICE, nullptr, reinterpret_cast<PBYTE>(service),
+                                      sizeof(service) - sizeof(wchar_t), nullptr);
+    SetupDiGetDeviceRegistryPropertyW(set, &info, SPDRP_DEVICEDESC, nullptr, reinterpret_cast<PBYTE>(description),
+                                      sizeof(description) - sizeof(wchar_t), nullptr);
+    REXLOG_INFO("Portal (usb): USB device {} ({}), driver {}", WideUtf8(ids), WideUtf8(description),
+                service[0] ? WideUtf8(service) : std::string("none"));
+    ++found;
+  }
+  SetupDiDestroyDeviceInfoList(set);
+  if (found == 0) REXLOG_INFO("Portal (usb): no USB device of vendor 1430 plugged in");
+}
+#endif
+
+std::string HexBytes(const uint8_t* data, size_t n) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(n * 3);
+  for (size_t i = 0; i < n; ++i) {
+    if (i) out += ' ';
+    out += kHex[data[i] >> 4];
+    out += kHex[data[i] & 0xF];
+  }
+  return out;
+}
+
+}  // namespace
+
+UsbPortal::UsbPortal() : traffic_("usb", [](const std::string& line) { REXLOG_INFO("{}", line); }) {
+  // The USB mode builds a UsbPortal once a second while none opens (portal_rex's hot-plug retry),
+  // so the device lists below go to the log once per run, not with every retry.
+  static std::atomic<bool> listed{false};
+  const bool list_devices = !listed.exchange(true);
+#ifdef _WIN32
+  if (list_devices) LogPortalDrivers();
+#endif
+  if (hid_init() != 0) return;
+  for (const auto& [vendor_id, product_id] : kKnownPortals) {
+    device_ = hid_open(vendor_id, product_id, nullptr);
+    if (device_ != nullptr) {
+      vendor_id_ = vendor_id;
+      product_id_ = product_id;
+      break;
+    }
+  }
+  // No HID portal: a PS3 / Wii / Wii U one may have the WinUSB driver instead (Zadig, for Dolphin's or
+  // Cemu's passthrough; Device Manager calls it "Spyro Porta" then, Core of Light #58).
+  if (device_ == nullptr) {
+    auto io = std::make_unique<WinUsbPortalIo>(0x0150);
+    if (io->IsOpen()) {
+      winusb_ = std::move(io);
+      vendor_id_ = 0x1430;
+      product_id_ = 0x0150;
+      REXLOG_INFO("Portal (usb): opened 1430:0150 on WinUSB");
+      return;
+    }
+  }
+  // Which portal was opened, or, when none, every HID device of the portals' maker (vendor 1430)
+  // Windows shows: tells an untested model or a portal that isn't a HID device (an Xbox 360 one on
+  // the Xbox controller driver, TrapTeamRecomp #19) from no portal at all.
+  if (device_ != nullptr) {
+    REXLOG_INFO("Portal (usb): opened {:04x}:{:04x}", vendor_id_, product_id_);
+  } else if (list_devices) {
+    hid_device_info* list = hid_enumerate(0x1430, 0);
+    if (list == nullptr) REXLOG_WARN("Portal (usb): no known portal opened, no HID device of vendor 1430 at all");
+    for (const hid_device_info* d = list; d != nullptr; d = d->next) {
+      REXLOG_WARN("Portal (usb): no known portal opened; vendor 1430 HID device {:04x}, usage page {:04x}, usage "
+                  "{:04x}, interface {}", d->product_id, d->usage_page, d->usage, d->interface_number);
+    }
+    hid_free_enumeration(list);
+  }
+  // Deliberately never call hid_exit(): it finalizes the whole hidapi library, not just this
+  // device, and this portal lives for the whole process (see portal_rex.cpp's InstallPortal,
+  // which never frees its SoftwarePortal either, for the same reason). Process exit cleans this up.
+}
+
+UsbPortal::~UsbPortal() {
+  audio_stopping_.store(true);
+  audio_queue_.Close();
+  if (audio_thread_.joinable()) audio_thread_.join();
+  if (audio_device_ != nullptr) hid_close(audio_device_);
+  if (device_ != nullptr) hid_close(device_);
+}
+
+void UsbPortal::SendRaw(const Report& report) {
+  if (winusb_) {
+    const bool ok = winusb_->SetReport(report.data(), report.size());
+    if (raw_writes_logged_.fetch_add(1) < kRawLogCount) {
+      REXLOG_INFO("Portal (usb): 1430:0150 (WinUSB) command -> {} ({})", HexBytes(report.data(), 8),
+                  ok ? "taken" : "not taken");
+    }
+    if (ok) {
+      consecutive_errors_.store(0);
+    } else {
+      consecutive_errors_.fetch_add(1);
+      if (!write_error_logged_.exchange(true)) REXLOG_WARN("Portal (usb): WinUSB command failed");
+    }
+    return;
+  }
+  if (device_ == nullptr) return;
+  // hid_send_output_report() sends via a HID SET_REPORT control transfer -- unlike hid_write(),
+  // which prefers this device's interrupt OUT endpoint and is accepted at the transport level but
+  // silently discarded by its firmware. Needs a leading report-ID byte (0, this device has no
+  // numbered reports), so the buffer is one longer than the report itself.
+  std::array<uint8_t, kReportSize + 1> buffer{};  // buffer[0] = report ID 0
+  std::copy(report.begin(), report.end(), buffer.begin() + 1);
+  const int written = hid_send_output_report(device_, buffer.data(), buffer.size());
+  if (raw_writes_logged_.fetch_add(1) < kRawLogCount) {
+    REXLOG_INFO("Portal (usb): {:04x}:{:04x} command -> {} ({})", vendor_id_, product_id_,
+                HexBytes(report.data(), 8), written);
+  }
+  if (written < 0) {
+    consecutive_errors_.fetch_add(1);
+    if (!write_error_logged_.exchange(true)) {
+      REXLOG_WARN("Portal (usb): hid_send_output_report failed: {}", HidErrorUtf8(device_));
+    }
+  } else {
+    consecutive_errors_.store(0);
+  }
+}
+
+Report UsbPortal::ReceiveRaw() {
+  if (device_ == nullptr && !winusb_) return Report{};
+  Report report{};
+  if (winusb_) {
+    // Answers come from WinUsbPortalIo's reader thread; none queued is an idle poll, as a 0 from
+    // hid_read_timeout below. -1: reading failed, the portal is very likely unplugged.
+    const int got = winusb_->Read(report.data(), report.size());
+    if (got < 0) {
+      consecutive_errors_.fetch_add(1);
+      return Report{};
+    }
+    consecutive_errors_.store(0);
+    if (got == 0) return Report{};
+    if (raw_reads_logged_.fetch_add(1) < kRawLogCount) {
+      REXLOG_INFO("Portal (usb): 1430:0150 (WinUSB) reply <- {}", HexBytes(report.data(), 16));
+    }
+    if (report[0] == 0x52 && report[1] == 0x01) {  // an old portal's ready reply, as below
+      old_portal_.store(true);
+      report[1] = 0x02;
+      report[2] = 0x1B;
+    }
+    return report;
+  }
+  // The game polls the read side "continuously (tens of times a second) regardless of whether a
+  // portal answers" (docs/portal-protocol.md), synchronously on whatever thread calls into the
+  // portal hook -- so every idle poll blocks that thread for however long this timeout is. 1ms is
+  // enough for a real device's normal (low-single-digit-ms) reply latency, without making an idle
+  // poll itself the bottleneck the way a 50ms timeout did; a genuinely dead device still returns
+  // (an all-zero Report on timeout/failure is a shape the game already tolerates), just faster.
+  const int bytes_read = hid_read_timeout(device_, report.data(), report.size(), 1);
+  // 0 means "no report within the timeout", hidapi's normal outcome for an idle poll, not a
+  // failure -- resets consecutive_errors_ same as a real read, since it proves the transport
+  // itself is still working. -1 is the actual error indicator.
+  if (bytes_read > 0 && raw_reads_logged_.fetch_add(1) < kRawLogCount) {
+    REXLOG_INFO("Portal (usb): {:04x}:{:04x} reply ({} bytes) <- {}", vendor_id_, product_id_, bytes_read,
+                HexBytes(report.data(), static_cast<size_t>(bytes_read) < 16 ? static_cast<size_t>(bytes_read) : 16));
+  }
+  if (bytes_read < 0) {
+    consecutive_errors_.fetch_add(1);
+    if (!read_error_logged_.exchange(true)) {
+      REXLOG_WARN("Portal (usb): hid_read failed: {}", HidErrorUtf8(device_));
+    }
+  } else {
+    consecutive_errors_.store(0);
+  }
+  // Swap Force rejects Spyro's Adventure/Giants portals ("Wrong Portal version") by the ID in the
+  // ready reply (52 01 xx). Those portals otherwise work, so report the ID SoftwarePortal answers
+  // with (52 02 1B), which the game accepts. Newer portals are passed through unchanged.
+  if (bytes_read > 0 && report[0] == 0x52 && report[1] == 0x01) {
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+      REXLOG_INFO("Portal (usb): old portal (ready reply 52 01 {:02X}), reporting 52 02 1B", report[2]);
+    }
+    old_portal_.store(true);
+    report[1] = 0x02;
+    report[2] = 0x1B;
+  }
+  return bytes_read > 0 ? report : Report{};
+}
+
+void UsbPortal::Write(const Report& report) {
+  std::lock_guard<std::mutex> lock(io_mutex_);
+  // A dump in progress owns the device exclusively; the game's own writes are dropped rather than
+  // reaching real hardware (see DumpFigure's comment).
+  if (dumping_slot_.load() >= 0) return;
+  if (IsOpen()) traffic_.OnCommand(report);
+  if (report[0] == 0x57) {  // 'W': write one figure block -- log for offset research.
+    const int slot = report[1] & 0x0F;
+    const int block = report[2];
+    REXLOG_TRACE("Portal figure research: usb slot {} block {} write -> {}", slot, block,
+                 HexBytes(&report[3], kBlockSize));
+  }
+  // An old portal ignores the Traptanium side lights (J, L) the newer games send it, as they take
+  // it for one (the ready reply above): their side 0 as its one colour, the rest left out. Both
+  // portal modes write through here, Automatic by RealPortalBridge.
+  if (old_portal_.load() && (report[0] == 'J' || report[0] == 'L')) {
+    if (const std::optional<Report> old = LightForOldPortal(report)) SendRaw(*old);
+    return;
+  }
+  SendRaw(report);
+}
+
+Report UsbPortal::Read() {
+  std::lock_guard<std::mutex> lock(io_mutex_);
+  const int dumping = dumping_slot_.load();
+  if (dumping >= 0) {
+    // Fake a status frame reporting `dumping` as empty, so the game sees a clean removal instead
+    // of the portal simply going silent -- other slots keep reporting whatever they last did.
+    Report synthetic{};
+    synthetic[0] = 0x53;
+    uint32_t states = 0;
+    for (int s = 0; s < kMaxFigures; ++s) {
+      if (s != dumping && slot_present_[s].load()) states |= (0x1u << (2 * s));
+    }
+    synthetic[1] = static_cast<uint8_t>(states);
+    synthetic[2] = static_cast<uint8_t>(states >> 8);
+    synthetic[3] = static_cast<uint8_t>(states >> 16);
+    synthetic[4] = static_cast<uint8_t>(states >> 24);
+    synthetic[5] = status_counter_.fetch_add(1);
+    synthetic[6] = last_active_.load() ? 1 : 0;
+    ObserveReply(synthetic);  // keeps PresentSlots()/the passive cache consistent with this
+    return synthetic;
+  }
+  // The device streams status frames faster than Swap Force polls (~10 Hz), so
+  // the HID input queue grows and command replies reach the game seconds late; it then resets the
+  // portal every ~20 s and never reads a figure. Drain what is queued: command replies are passed
+  // on in order, status frames collapse to the newest one, keeping a slot's "added" state (3) if a
+  // dropped frame had it. The queue (members) is guarded by io_mutex_.
+  for (int i = 0; i < 64; ++i) {
+    Report r = ReceiveRaw();
+    if (r[0] == 0) break;
+    if (r[0] != 0x53) {
+      pending_replies_.push_back(r);
+      continue;
+    }
+    const uint32_t states = static_cast<uint32_t>(r[1]) | (static_cast<uint32_t>(r[2]) << 8) |
+                            (static_cast<uint32_t>(r[3]) << 16) | (static_cast<uint32_t>(r[4]) << 24);
+    for (int slot = 0; slot < kMaxFigures; ++slot) {
+      if (((states >> (2 * slot)) & 0x03) == 0x03) added_mask_ |= 1u << slot;
+    }
+    newest_status_ = r;
+    have_status_ = true;
+  }
+  Report report{};
+  if (!pending_replies_.empty()) {
+    report = pending_replies_.front();
+    pending_replies_.pop_front();
+  } else if (have_status_) {
+    report = newest_status_;
+    have_status_ = false;
+    uint32_t states = static_cast<uint32_t>(report[1]) | (static_cast<uint32_t>(report[2]) << 8) |
+                      (static_cast<uint32_t>(report[3]) << 16) | (static_cast<uint32_t>(report[4]) << 24);
+    for (int slot = 0; slot < kMaxFigures; ++slot) {
+      if ((added_mask_ >> slot & 1u) && ((states >> (2 * slot)) & 0x03) == 0x01) {
+        states |= 0x03u << (2 * slot);  // present -> added, so the game sees the new figure
+      }
+    }
+    added_mask_ = 0;
+    report[1] = static_cast<uint8_t>(states);
+    report[2] = static_cast<uint8_t>(states >> 8);
+    report[3] = static_cast<uint8_t>(states >> 16);
+    report[4] = static_cast<uint8_t>(states >> 24);
+  } else {
+    return report;  // nothing queued
+  }
+  ObserveReply(report);
+  traffic_.OnReply(report);
+  return report;
+}
+
+bool UsbPortal::FigurePresent() const {
+  for (int slot = 0; slot < kMaxFigures; ++slot) {
+    if (slot_present_[slot].load()) return true;
+  }
+  return false;
+}
+
+std::vector<int> UsbPortal::PresentSlots() const {
+  std::vector<int> slots;
+  for (int slot = 0; slot < kMaxFigures; ++slot) {
+    if (slot_present_[slot].load()) slots.push_back(slot);
+  }
+  return slots;
+}
+
+std::optional<std::pair<uint16_t, uint16_t>> UsbPortal::DetectedIdVariant(int slot) const {
+  if (slot < 0 || slot >= kMaxFigures) return std::nullopt;
+  std::lock_guard<std::mutex> lock(detected_mutex_);
+  return slot_id_variant_[slot];
+}
+
+void UsbPortal::ObserveReply(const Report& report) {
+  // 'S' status frame: 0x53, then 4 bytes of little-endian slot state (2 bits each, slot 0
+  // lowest -- up to kMaxFigures slots, matching a real portal holding more than one figure at
+  // once, e.g. Giants' 2-player co-op plus items), a counter, and an active flag
+  // (docs/portal-protocol.md).
+  if (report[0] == 0x53) {
+    const uint32_t states = static_cast<uint32_t>(report[1]) | (static_cast<uint32_t>(report[2]) << 8) |
+                            (static_cast<uint32_t>(report[3]) << 16) |
+                            (static_cast<uint32_t>(report[4]) << 24);
+    last_active_.store(report[6] != 0);
+    for (int slot = 0; slot < kMaxFigures; ++slot) {
+      const bool present = ((states >> (2 * slot)) & 0x03) != 0;
+      slot_present_[slot].store(present);
+      if (!present) {
+        {
+          std::lock_guard<std::mutex> lock(detected_mutex_);
+          slot_id_variant_[slot].reset();
+        }
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        slot_cache_[slot] = FigureData{};
+        slot_block_seen_[slot].fill(false);
+      }
+    }
+    return;
+  }
+  if (report[0] == 0x51 && (report[1] & 0x10) != 0) {
+    const int slot = report[1] & 0x0F;
+    const int block = report[2];
+    REXLOG_TRACE("Portal figure research: usb slot {} block {} read -> {}", slot, block,
+                 HexBytes(&report[3], kBlockSize));
+    if (block < static_cast<int>(kBlockCount)) {
+      std::lock_guard<std::mutex> lock(cache_mutex_);
+      std::copy_n(report.begin() + 3, kBlockSize, slot_cache_[slot].begin() + block * kBlockSize);
+      slot_block_seen_[slot][block] = true;
+    }
+  }
+  // 'Q' reply to a block-1 read: 0x51, slot (low nibble) with 0x10 set if present, block index,
+  // then the block's 16 data bytes. Block 1 covers global figure offsets 0x10-0x1F, where id
+  // (offset 0x10) and variant (offset 0x1C) live -- see figure_file.h's
+  // ReadFigureId/ReadFigureVariant, which read the same two fields from a full 1024-byte dump.
+  if (report[0] == 0x51 && (report[1] & 0x10) != 0 && report[2] == 1) {
+    const int slot = report[1] & 0x0F;  // always 0-15, matching kMaxFigures
+    const uint16_t id = static_cast<uint16_t>(report[3]) | (static_cast<uint16_t>(report[4]) << 8);
+    const uint16_t variant =
+        static_cast<uint16_t>(report[15]) | (static_cast<uint16_t>(report[16]) << 8);
+    std::lock_guard<std::mutex> lock(detected_mutex_);
+    slot_id_variant_[slot] = std::make_pair(id, variant);
+  }
+}
+
+std::optional<FigureData> UsbPortal::DumpFigure(int slot, std::string* error) {
+  auto Fail = [&](std::string_view msg) -> std::optional<FigureData> {
+    if (error) *error = std::string(msg);
+    return std::nullopt;
+  };
+  if (slot < 0 || slot >= kMaxFigures) return Fail("invalid slot");
+  if (!IsOpen()) return Fail("no USB portal open");
+  if (!slot_present_[slot].load()) return Fail("no figure in that slot");
+
+  dumping_slot_.store(slot);
+  FigureData data{};
+  bool ok = true;
+  {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    for (int block = 0; block < static_cast<int>(kBlockCount); ++block) {
+      Report request{};
+      request[0] = 0x51;  // 'Q'
+      request[1] = static_cast<uint8_t>(slot & 0x0F);
+      request[2] = static_cast<uint8_t>(block);
+      SendRaw(request);
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+      Report reply{};
+      bool matched = false;
+      while (std::chrono::steady_clock::now() < deadline) {
+        reply = ReceiveRaw();
+        if (reply[0] == 0) continue;  // timeout/no-report this poll; keep trying within the window
+        if (reply[0] == 0x53) {
+          // The device still reports its genuine state even though we're not forwarding it to
+          // the game -- check the dumped slot's own bit to catch a physical removal mid-dump.
+          const uint32_t states =
+              static_cast<uint32_t>(reply[1]) | (static_cast<uint32_t>(reply[2]) << 8) |
+              (static_cast<uint32_t>(reply[3]) << 16) | (static_cast<uint32_t>(reply[4]) << 24);
+          const uint32_t slot_state = (states >> (2 * slot)) & 0x03;
+          if (slot_state == 0 || slot_state == 2) {  // 0 empty, 2 removing
+            ok = false;
+            break;
+          }
+          continue;
+        }
+        // This slot's reply to this block: a read the game sent for another slot (a trap, say) just
+        // before the dump began can still be answered now, with the same block number (Core of
+        // Light #60, TheBiemGamer).
+        if (reply[0] == 0x51 && (reply[1] & 0x10) != 0 && (reply[1] & 0x0F) == slot && reply[2] == block) {
+          matched = true;
+          break;
+        }
+      }
+      if (!ok) break;
+      if (!matched) {
+        ok = false;
+        break;
+      }
+      std::copy_n(reply.begin() + 3, kBlockSize, data.begin() + block * kBlockSize);
+    }
+    // Under the lock: Read() and Write() look at it under the same lock.
+    dumping_slot_.store(-1);
+  }
+  // The header (blocks 0 and 1) carries a CRC over its first 30 bytes: a dump that doesn't match
+  // isn't saved as this figure.
+  if (ok && static_cast<uint16_t>(data[0x1E] | (data[0x1F] << 8)) != FigureCrc16(data.data(), 0x1E)) {
+    return Fail("the figure's header didn't check out (CRC); try again");
+  }
+
+  if (!ok) return Fail("the figure was removed or stopped responding during the dump");
+  return data;
+}
+
+std::optional<FigureData> UsbPortal::CachedFigureData(int slot) const {
+  if (slot < 0 || slot >= kMaxFigures) return std::nullopt;
+  // The AES key for every block is derived from blocks 0 and 1 (figure_stats.h), so those two
+  // are needed before any of the rest can be decrypted; 0x08/0x0A/0x0C are the blocks
+  // ParseFigureStats itself reads (area 0's gold/level, and the nickname).
+  static constexpr int kNeededBlocks[] = {0x00, 0x01, 0x08, 0x0A, 0x0C};
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  for (int block : kNeededBlocks) {
+    if (!slot_block_seen_[slot][block]) return std::nullopt;
+  }
+  return slot_cache_[slot];
+}
+
+void UsbPortal::WriteAudio(std::span<const int16_t> pcm) {
+  if (!IsOpen()) return;
+  if (SpeakerGaveUp()) return;
+  std::call_once(audio_thread_started_,
+                 [this] { audio_thread_ = std::thread([this] { AudioWriterLoop(); }); });
+  // Never blocks the game thread: full packets go to the writer thread's bounded queue.
+  audio_packetizer_.Add(pcm, [this](const AudioPacket& packet) { audio_queue_.Push(packet); });
+}
+
+// The speaker's own handle to the HID portal, opened once by the writer thread (Core of Light #102: a
+// Traptanium portal on the Windows HID driver made Trap Team drop frames while the portal's speaker
+// played, on WinUSB it ran smoothly). A hid_write there waits until the portal takes the packet, and
+// the portal takes them at its playback rate (one per 4 ms), so with one handle under io_mutex_ the
+// game's portal commands waited behind the sound nearly all the time. A second handle to the same
+// device path keeps hidapi's per-handle state (overlapped write, error text) apart, so the writes need
+// no lock, like the WinUSB path's interrupt writes. Windows opens HID devices shared; if the open
+// fails anyway, the writes stay on device_ under io_mutex_ as before.
+void UsbPortal::OpenAudioHandle() {
+  if (winusb_ || device_ == nullptr) return;
+  std::string path;
+  {
+    std::lock_guard<std::mutex> lock(io_mutex_);  // every hidapi call on device_ stays serialized
+    const hid_device_info* info = hid_get_device_info(device_);
+    if (info != nullptr && info->path != nullptr) path = info->path;
+  }
+  if (!path.empty()) audio_device_ = hid_open_path(path.c_str());
+  if (audio_device_ != nullptr) {
+    REXLOG_INFO("Portal (usb): speaker sound on its own handle");
+  } else {
+    REXLOG_INFO("Portal (usb): speaker sound shares the commands' handle (a second open failed)");
+  }
+}
+
+// Speaker audio goes out on the interrupt OUT endpoint (hid_write), unlike commands, which the
+// firmware only accepts as SET_REPORT (hid_send_output_report, see SendRaw).
+void UsbPortal::WriteAudioPacket(const AudioPacket& packet) {
+  bool ok = false;
+  if (winusb_) {
+    // WinUsbPortalIo::WriteInterrupt has its own write lock, and the commands go over the control
+    // pipe, so these two don't need io_mutex_ (nor wait for each other).
+    ok = winusb_->WriteInterrupt(packet.data(), kAudioPacketSize);
+  } else {
+    uint8_t out[1 + kAudioPacketSize];
+    out[0] = 0;  // report ID
+    std::memcpy(out + 1, packet.data(), kAudioPacketSize);
+    const auto start = std::chrono::steady_clock::now();
+    if (audio_device_ != nullptr) {
+      ok = hid_write(audio_device_, out, sizeof(out)) >= 0;  // its own handle: no io_mutex_ (OpenAudioHandle)
+    } else {
+      std::lock_guard<std::mutex> lock(io_mutex_);
+      ok = hid_write(device_, out, sizeof(out)) >= 0;
+    }
+    // How long the writes take, once per run in the log (Core of Light #102: on the Windows HID driver a
+    // write waits for the portal to take the packet).
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (audio_writes_timed_ < kAudioWritesTimed) {
+      audio_write_ms_sum_ += ms;
+      audio_write_ms_max_ = std::max(audio_write_ms_max_, ms);
+      if (++audio_writes_timed_ == kAudioWritesTimed) {
+        REXLOG_INFO("Portal (usb): speaker writes took {:.1f} ms on average, {:.1f} ms at most ({} writes, {})",
+                    audio_write_ms_sum_ / kAudioWritesTimed, audio_write_ms_max_, kAudioWritesTimed,
+                    audio_device_ != nullptr ? "own handle" : "shared handle");
+      }
+    }
+  }
+  if (speaker_health_.Note(ok)) {
+    REXLOG_WARN("Portal: the portal's speaker took no sound ({} writes in a row failed); the sound goes to the PC's "
+                "speakers now", SpeakerWriteHealth::kGiveUpAfter);
+  } else if (!ok) {
+    REXLOG_WARN("Portal: speaker audio write failed");
+  }
+}
+
+#if defined(_WIN32) && !defined(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+namespace {
+
+// Sleeps until `when` to within about half a millisecond: a 4 ms packet clock can't use
+// sleep_until, whose wake-ups are only as fine as Windows' 15.6 ms timer unless something raised it.
+void SleepUntilPrecise(std::chrono::steady_clock::time_point when) {
+  const auto now = std::chrono::steady_clock::now();
+  if (when <= now) return;
+#ifdef _WIN32
+  static thread_local HANDLE timer = CreateWaitableTimerExW(
+      nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  if (timer) {
+    LARGE_INTEGER due;
+    // Negative: relative, in 100 ns units.
+    due.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(when - now).count() / 100;
+    if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+      WaitForSingleObject(timer, INFINITE);
+      return;
+    }
+  }
+#endif
+  std::this_thread::sleep_until(when);
+}
+
+}  // namespace
+
+// PopWait also returns nullopt on a timeout, so the loop only ends once the destructor sets
+// audio_stopping_. With pacing (SetAudioPacing), a sound starts once `lead` packets are queued (or
+// 30 ms passed), those go out at once to fill the portal's buffer, then one packet each 4 ms; a gap
+// in the game's stream longer than the lead restarts the clock (Core of Light #67: a HID Traptanium
+// portal that stutters; the game's own stream is real time, 7.5 ms frames up to ~12 ms apart).
+void UsbPortal::AudioWriterLoop() {
+  OpenAudioHandle();
+  using Clock = std::chrono::steady_clock;
+  constexpr auto kPacketTime = std::chrono::microseconds(1000000 * kAudioSamplesPerPacket / kAudioSampleRate);
+  bool playing = false;
+  Clock::time_point next{};
+  for (;;) {
+    const int lead = audio_pacing_lead_.load();
+    if (lead > 0 && !playing) {
+      // Wait for the sound's first packets to collect.
+      auto first = audio_queue_.PopWait(std::chrono::milliseconds(500));
+      if (!first) {
+        if (audio_stopping_.load()) return;
+        continue;
+      }
+      const auto collect_until = Clock::now() + std::chrono::milliseconds(30);
+      while (audio_queue_.Size() + 1 < size_t(lead) && Clock::now() < collect_until &&
+             !audio_stopping_.load()) {
+        SleepUntilPrecise(Clock::now() + std::chrono::milliseconds(2));
+      }
+      WriteAudioPacket(*first);
+      for (int i = 1; i < lead; ++i) {
+        auto more = audio_queue_.PopWait(std::chrono::milliseconds(0));
+        if (!more) break;
+        WriteAudioPacket(*more);
+      }
+      playing = true;
+      next = Clock::now() + kPacketTime;
+      continue;
+    }
+    // Without pacing every packet goes as soon as it is there; with it, the next one waits for its
+    // turn, and a sound that ends (nothing for longer than the lead) starts over with a new lead.
+    const auto wait = lead > 0 ? std::chrono::milliseconds(4 * lead + 8) : std::chrono::milliseconds(500);
+    auto packet = audio_queue_.PopWait(wait);
+    if (!packet) {
+      if (audio_stopping_.load()) return;
+      playing = false;
+      continue;
+    }
+    if (lead > 0) {
+      const auto now = Clock::now();
+      if (now > next + kPacketTime * lead) {
+        next = now;  // fell behind (a long gap): the portal's buffer is empty anyway
+      }
+      SleepUntilPrecise(next);
+      next += kPacketTime;
+    }
+    WriteAudioPacket(*packet);
+  }
+}
+
+}  // namespace skylanders::portal

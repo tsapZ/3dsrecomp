@@ -30,6 +30,11 @@ void lift();
 bool present();
 // the game connected the portal at least once (a Skylanders game): the in-game menu shows its Portal page
 bool in_use();
+// A real USB Portal of Power instead of figure files (g_settings.real_portal; SKYLANDERS_PORTAL=usb wins): the game's
+// packets go to it and its answers back. Only in builds with RECOMP_USB_PORTAL (Windows).
+bool real_portal_supported();
+void set_real_portal(bool on);
+std::string real_portal_state();  // "Off", "Waiting for the game", "Connected", "Not found", "Unplugged?"
 // the figure file's name without its folder and extension ("" when the portal is empty)
 std::string figure_name();
 }  // namespace skylanders_portal

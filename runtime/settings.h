@@ -35,6 +35,7 @@ struct Settings {
     bool stack_items = true;   // stacks in the pockets, for games whose profile has them (runtime/stacks.cpp)
     bool free_camera = true;       // the right stick turns the camera, for games whose profile has it (freecam.cpp)
     bool camera_invert_y = false;  // ...pushed up, it looks down
+    bool real_portal = false;  // Skylanders: the game talks to a real USB Portal of Power instead of figure files
 };
 
 extern Settings g_settings;

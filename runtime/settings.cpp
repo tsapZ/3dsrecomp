@@ -63,6 +63,7 @@ void settings_load() {
     num("item_stacks", s.stack_items);  // (a new key: on by default, whatever "stack_items" said)
     num("free_camera", s.free_camera);
     num("camera_invert_y", s.camera_invert_y);
+    num("real_portal", s.real_portal);
     s.scale = std::clamp(s.scale, 0, 4);
     s.layout = std::max(s.layout, 0);  // (the frontend clamps it to its layouts)
     s.speed = std::clamp(s.speed, 25, 400);
@@ -90,7 +91,8 @@ void settings_save() {
       << "\npip=" << s.pip << "\npip_corner=" << s.pip_corner << "\npip_x=" << s.pip_x << "\npip_y=" << s.pip_y
       << "\npip_size=" << s.pip_size << "\nauto_focus=" << s.auto_focus << "\nhud=" << s.hud
       << "\ntex_filter=" << s.tex_filter << "\nitem_stacks=" << s.stack_items << "\naim_speed=" << s.aim_speed
-      << "\nfree_camera=" << s.free_camera << "\ncamera_invert_y=" << s.camera_invert_y << "\n";
+      << "\nfree_camera=" << s.free_camera << "\ncamera_invert_y=" << s.camera_invert_y
+      << "\nreal_portal=" << s.real_portal << "\n";
 }
 
 // ---- saves

@@ -9,10 +9,97 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
+
+#include "settings.h"
+#if RECOMP_USB_PORTAL
+#include "portal/usb/usb_portal.h"  // runtime/third_party/skylanders_portal (Windows builds)
+#endif
+
+#if RECOMP_USB_PORTAL
+// skylanders-portal's REXLOG_* lines (runtime/third_party/skylanders_portal/shim/rex/logging.h) in this log
+namespace skylanders_portal_log {
+void Line(const char *level, const std::string &text) { LOG("[portal usb] %s: %s\n", level, text.c_str()); }
+}  // namespace skylanders_portal_log
+#endif
 
 namespace skylanders_portal {
 namespace {
+
+#if RECOMP_USB_PORTAL
+// The real portal (the menu's "Real portal (USB)", g_settings.real_portal; SKYLANDERS_PORTAL=usb for a run): the
+// game's infrared packets go to a USB Portal of Power as the same commands (the 3DS portal speaks the console portal's
+// protocol, after the light's colour), its answers come back. skylanders-portal's UsbPortal (HID, or WinUSB when a
+// player replaced the driver) as the Xbox 360 ports use it; what the game writes goes onto the real figure, as on a
+// console. Opened at the first packet with the setting on, again after the setting changed.
+std::unique_ptr<skylanders::portal::UsbPortal> usb;  // (under mx)
+bool usb_tried = false;
+
+bool want_usb() {
+    static const char *env = getenv("SKYLANDERS_PORTAL");
+    if (env) return std::string(env) == "usb";
+    return g_settings.real_portal;
+}
+
+skylanders::portal::UsbPortal *usb_locked() {
+    if (!want_usb()) {
+        usb.reset();
+        usb_tried = false;
+        return nullptr;
+    }
+    if (!usb && !usb_tried) {
+        usb_tried = true;
+        usb = std::make_unique<skylanders::portal::UsbPortal>();
+        if (!usb->IsOpen()) {
+            LOG("[portal] no real portal found (USB): the game sees an empty portal\n");
+            usb.reset();
+        } else {
+            LOG("[portal] real portal (USB) opened\n");
+        }
+    }
+    return usb.get();
+}
+
+// (lock held) one packet of the game on the real portal: the answer as the infrared side sends it (the console
+// reply's length, as the emulated portal below), or nothing when the command has none or no answer came.
+std::vector<u8> relay_locked(skylanders::portal::UsbPortal &p, const u8 *c, u32 n) {
+    using skylanders::portal::Report;
+    const u8 cmd = c[0];
+    auto trimmed = [cmd](const Report &r) {
+        size_t len = 0;
+        switch (cmd) {
+        case 'R': len = 3; break;
+        case 'A': len = 4; break;
+        case 'S': len = 7; break;   // S, four bytes of slot bits, the counter, on/off
+        case 'Q': len = 19; break;  // Q, slot, block, 16 bytes
+        case 'W': len = 3; break;
+        }
+        return std::vector<u8>(r.begin(), r.begin() + len);
+    };
+    if (cmd == 'S') {  // the portal reports its status by itself: the newest report
+        for (int i = 0; i < 16; i++) {
+            const Report r = p.Read();
+            if (r[0] == 'S') return trimmed(r);
+        }
+        return {};
+    }
+    Report out{};
+    std::copy_n(c, std::min<u32>(n, (u32)out.size()), out.begin());
+    p.Write(out);
+    if (cmd == 'J') return {0x4a};  // a light fade: older portals don't answer it, the game only wants the echo
+    if (cmd != 'R' && cmd != 'A' && cmd != 'Q' && cmd != 'W') return {};  // C, L and the rest: no answer
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    while (std::chrono::steady_clock::now() < until) {
+        const Report r = p.Read();
+        if (r[0] != cmd) continue;
+        if ((cmd == 'Q' || cmd == 'W') && n >= 3 && ((r[1] & 0x0f) != (c[1] & 0x0f) || r[2] != c[2])) continue;
+        return trimmed(r);
+    }
+    LOG("[portal] the real portal didn't answer %c in 300 ms\n", cmd);
+    return {};
+}
+#endif
 
 // status reports that say "just put on" before "on" (skylanders-portal's kAddedReports)
 constexpr int kAddedReports = 8;
@@ -154,6 +241,34 @@ std::string figure_name() {
     return std::string(p.begin(), p.end());
 }
 
+bool real_portal_supported() {
+#if RECOMP_USB_PORTAL
+    return true;
+#else
+    return false;
+#endif
+}
+
+void set_real_portal(bool on) {
+    std::lock_guard<std::mutex> lk(mx);
+    g_settings.real_portal = on;
+#if RECOMP_USB_PORTAL
+    usb.reset();  // opened (or looked for) again at the game's next packet
+    usb_tried = false;
+#endif
+}
+
+std::string real_portal_state() {
+    std::lock_guard<std::mutex> lk(mx);
+#if RECOMP_USB_PORTAL
+    if (!want_usb()) return "Off";
+    if (usb) return usb->SeemsDisconnected() ? "Unplugged?" : "Connected";
+    return usb_tried ? "Not found" : "Waiting for the game";
+#else
+    return "Off";
+#endif
+}
+
 void on_connect() {
     std::lock_guard<std::mutex> lk(mx);
     connected_once = true;
@@ -199,6 +314,13 @@ void on_receive(const u8 *data, u32 size, const Send &send) {
         if (size <= 3) return;
         const u8 *c = data + 3;
         const u32 n = size - 3;
+#if RECOMP_USB_PORTAL
+        if (auto *p = usb_locked()) {
+            reply = relay_locked(*p, c, n);
+            if (reply.empty()) return;
+            goto answer;
+        }
+#endif
         switch (c[0]) {
         case 'J':  // a light fade on one side (Trap Team portals): acknowledged with a bare 4A, as skylanders-portal's
                    // SoftwarePortal does (SuperChargers Racing sends one pair every 3 s while it waits for a Skylander)
@@ -256,6 +378,9 @@ void on_receive(const u8 *data, u32 size, const Send &send) {
             }
             return;
         }
+#if RECOMP_USB_PORTAL
+    answer:
+#endif
         // SKYLANDERS_PORTAL_LOG: what the game asks and gets, every packet (the light and other commands without an
         // answer above), to see what a game does with a figure
         static const bool trace = getenv("SKYLANDERS_PORTAL_LOG") != nullptr;

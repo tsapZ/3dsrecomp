@@ -238,7 +238,9 @@ std::vector<Row> rows(Page p) {
         // a Skylanders game (it connected its portal, or says so in its name): the figure files to put on it
         if (skylanders_portal::in_use() || g_game.name.find("Skylanders") != std::string::npos) {
             const std::string on = skylanders_portal::figure_name();
-            r.push_back({"Portal", on.empty() ? "Empty" : on, "", nullptr, [] { push_portal(figures_root()); }});
+            const bool real = skylanders_portal::real_portal_supported() && s.real_portal;
+            r.push_back({"Portal", real ? "Real portal" : on.empty() ? "Empty" : on, "", nullptr,
+                         [] { push_portal(figures_root()); }});
         }
         r.push_back({"Saves", "", "", nullptr, [] { push(SAVES); }});
         r.push_back({"Clock", clock_text("%d %b %Y %H:%M"), "", nullptr, [] { push(CLOCK); }});
@@ -434,6 +436,15 @@ std::vector<Row> rows(Page p) {
     }
     case PORTAL: {
         const std::string dir = stack.back().dir;
+        // a real USB portal instead of the files (Windows builds): the figures then go on that portal by hand
+        if (skylanders_portal::real_portal_supported() && dir == figures_root()) {
+            r.push_back({"Real portal (USB)", onoff(s.real_portal),
+                         s.real_portal ? "The game talks to your Portal of Power: put figures on it. " +
+                                             skylanders_portal::real_portal_state() + "."
+                                       : "Off: the figure files below go on the portal.",
+                         [&s](int) { skylanders_portal::set_real_portal(!s.real_portal); }});
+            if (s.real_portal) break;
+        }
         const std::string on = skylanders_portal::figure_name();
         r.push_back({"On the portal", on.empty() ? "Nothing" : on, "", nullptr, nullptr, true});
         if (!on.empty())
