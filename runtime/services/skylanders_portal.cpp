@@ -22,6 +22,7 @@ std::array<u8, 1024> figure{};
 bool figure_on = false;
 std::string figure_file;  // (UTF-8)
 u32 generation = 0;  // changes with every place / lift, so the device tells the game
+bool connected_once = false;  // the game connected the portal at least once (in_use(): the menu's Portal page)
 
 // the device's state for the current connection
 bool active = false;      // the game turned the portal on (A 01)
@@ -141,6 +142,11 @@ bool present() {
     return figure_on;
 }
 
+bool in_use() {
+    std::lock_guard<std::mutex> lk(mx);
+    return connected_once;
+}
+
 std::string figure_name() {
     std::lock_guard<std::mutex> lk(mx);
     if (!figure_on) return "";
@@ -150,6 +156,7 @@ std::string figure_name() {
 
 void on_connect() {
     std::lock_guard<std::mutex> lk(mx);
+    connected_once = true;
     run_script_locked();
     if (!list_loaded) {
         list_loaded = true;

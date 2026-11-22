@@ -28,6 +28,8 @@ void on_receive(const u8 *data, u32 size, const Send &send);
 bool place(const std::string &path);
 void lift();
 bool present();
+// the game connected the portal at least once (a Skylanders game): the in-game menu shows its Portal page
+bool in_use();
 // the figure file's name without its folder and extension ("" when the portal is empty)
 std::string figure_name();
 }  // namespace skylanders_portal

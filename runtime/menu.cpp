@@ -5,13 +5,16 @@
 #include "menu.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <ctime>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
+#include "services/skylanders_portal.h"
 #include "audio_iface.h"
 #include "cloud.h"
 #include "freecam.h"
@@ -64,13 +67,14 @@ struct Row {
     std::function<void()> activate;   // action rows
     bool header = false;              // section title, not selectable
 };
-enum Page { MAIN, SAVES, BACKUP, CLOCK, GRAPHICS, SPEED, CONFIRM };
+enum Page { MAIN, SAVES, BACKUP, CLOCK, GRAPHICS, SPEED, CONFIRM, PORTAL };
 struct Level {
     Page page;
     int sel = 0;
     float scroll = 0;    // window pixels scrolled down the page
     bool follow = true;  // scroll to keep the selection in view (it moved by keys); a page the mouse or a finger
                          // points at stays put (the rows must not slide under it)
+    std::string dir;     // PORTAL: the folder shown (UTF-8), one level per folder so Back goes up
 };
 std::vector<Level> stack;
 std::string confirm_text;
@@ -106,6 +110,50 @@ std::string when(time_t t) {
     return b;
 }
 bool cloud_restart;  // a save picked from the cloud: restored (and the game restarted) once it's downloaded
+
+// ---- the Skylanders portal (the Portal page): the figure files in Documents/Skylanders/Figures, the folder the
+// Xbox 360 ports and Core of Light share, one page per folder (Back goes up). A folder is listed when its page is
+// shown and again every few seconds, not every frame.
+namespace fs = std::filesystem;
+fs::path u8p(const std::string &s) { return fs::path(std::u8string(s.begin(), s.end())); }
+std::string p8(const fs::path &p) {
+    const std::u8string u = p.u8string();
+    return std::string(u.begin(), u.end());
+}
+std::string figures_root() {
+    const char *docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);  // (with a trailing separator)
+    return docs ? std::string(docs) + "Skylanders/Figures" : std::string();
+}
+struct Listing {
+    std::string dir;
+    std::vector<std::string> folders, files;  // names, sorted
+    Uint64 at = 0;
+};
+const Listing &listing(const std::string &dir) {
+    static Listing l;
+    if (l.dir == dir && SDL_GetTicks() - l.at < 3000) return l;
+    l = Listing{dir, {}, {}, SDL_GetTicks()};
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(u8p(dir), ec)) {
+        std::error_code ec2;
+        if (e.is_directory(ec2)) {
+            l.folders.push_back(p8(e.path().filename()));
+            continue;
+        }
+        std::string ext = p8(e.path().extension());
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        // the figure files: 1024 bytes, as the Xbox 360 ports and skylanders_portal::place() take them
+        if ((ext == ".sky" || ext == ".bin" || ext == ".dump") && e.file_size(ec2) == 1024)
+            l.files.push_back(p8(e.path().filename()));
+    }
+    std::sort(l.folders.begin(), l.folders.end());
+    std::sort(l.files.begin(), l.files.end());
+    return l;
+}
+void push_portal(const std::string &dir) {
+    stack.push_back({PORTAL, 0});
+    stack.back().dir = dir;
+}
 
 // Cloud saves (runtime/cloud.cpp): the bucket, each device's save of this game
 void cloud_rows(std::vector<Row> &r) {
@@ -187,6 +235,11 @@ std::vector<Row> rows(Page p) {
     switch (p) {
     case MAIN:
         r.push_back({"Resume", "", "", nullptr, [] { toggle(); }});
+        // a Skylanders game (it connected its portal, or says so in its name): the figure files to put on it
+        if (skylanders_portal::in_use() || g_game.name.find("Skylanders") != std::string::npos) {
+            const std::string on = skylanders_portal::figure_name();
+            r.push_back({"Portal", on.empty() ? "Empty" : on, "", nullptr, [] { push_portal(figures_root()); }});
+        }
         r.push_back({"Saves", "", "", nullptr, [] { push(SAVES); }});
         r.push_back({"Clock", clock_text("%d %b %Y %H:%M"), "", nullptr, [] { push(CLOCK); }});
         r.push_back({"Graphics", "", "", nullptr, [] { push(GRAPHICS); }});
@@ -379,6 +432,36 @@ std::vector<Row> rows(Page p) {
                          [&s](int d) { cycle(s.aim_speed, {25, 50, 75, 100, 125, 150, 200, 300, 400}, d); }});
         break;
     }
+    case PORTAL: {
+        const std::string dir = stack.back().dir;
+        const std::string on = skylanders_portal::figure_name();
+        r.push_back({"On the portal", on.empty() ? "Nothing" : on, "", nullptr, nullptr, true});
+        if (!on.empty())
+            r.push_back({"Lift it off", "", "", nullptr, [] {
+                             skylanders_portal::lift();
+                             say("Lifted off the portal");
+                         }});
+        const Listing &l = listing(dir);
+        if (l.folders.empty() && l.files.empty())
+            r.push_back({"No figure files here", "",
+                         "Figure files (1024 bytes: .sky, .bin, .dump) go into Documents > Skylanders > Figures, the "
+                         "folder the Xbox 360 games use too.",
+                         nullptr, nullptr, true});
+        for (const auto &f : l.folders)
+            r.push_back({f, "›", "", nullptr, [dir, f] { push_portal(p8(u8p(dir) / u8p(f))); }});
+        for (const auto &f : l.files) {
+            const std::string path = p8(u8p(dir) / u8p(f)), name = p8(u8p(f).stem());
+            r.push_back({name, name == on ? "On the portal" : "", "", nullptr, [path, name] {
+                             if (!skylanders_portal::place(path)) {
+                                 say("Not a figure file: " + name);
+                                 return;
+                             }
+                             say("On the portal: " + name);
+                             toggle();  // back to the game, which sees it put on
+                         }});
+        }
+        break;
+    }
     case CONFIRM:
         r.push_back({confirm_text, "", "", nullptr, nullptr, true});
         r.push_back({"Cancel", "", "", nullptr, [] { pop(); }});
@@ -401,6 +484,7 @@ const char *title(Page p) {
     case GRAPHICS: return "Graphics";
     case SPEED: return "Speed & audio";
     case CONFIRM: return "Are you sure?";
+    case PORTAL: return "Portal";
     }
     return "";
 }

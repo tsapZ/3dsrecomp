@@ -146,9 +146,11 @@ out empty folders, and Mario Kart 7 resets a save whose empty `replay_` folder i
 ## Skylanders portal
 
 The five Skylanders 3DS games (Spyro's Adventure, Giants, Swap Force, Trap Team, SuperChargers Racing) came with a
-battery Portal of Power that talks to the console over infrared. ir:USER emulates it: **F5** puts a figure on the
-portal (a file dialog for a 1024-byte figure file, the same files the Xbox 360 Skylanders ports use, from your own
-toys), **F6** lifts it off, and the window title names the figure on the portal. The file is only read; what the game
+battery Portal of Power that talks to the console over infrared. ir:USER emulates it: the in-game menu's **Portal**
+page lists the figure files in `Documents/Skylanders/Figures` (1024-byte figure files from your own toys, the folder
+the Xbox 360 Skylanders ports use), one page per folder; picking one puts it on the portal, and the page can lift it
+off again, so a gamepad is enough. **F5** does the same through a file dialog, **F6** lifts the figure off, and the
+window title names the figure on the portal. The file is only read; what the game
 writes to the figure stays in memory. For scripted runs, `SKYLANDERS_PORTAL_FIGURE` names figure files separated by
 `;`: the first goes on at the first connection, and after the game has read one and reconnects, the next.
 `SKYLANDERS_PORTAL_LOG=1` logs every packet the game sends and what it gets back.
