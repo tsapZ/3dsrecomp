@@ -35,6 +35,9 @@ bool in_use();
 bool real_portal_supported();
 void set_real_portal(bool on);
 std::string real_portal_state();  // "Off", "Waiting for the game", "Connected", "Not found", "Unplugged?"
-// the figure file's name without its folder and extension ("" when the portal is empty)
+// the figure file's name without its folder and extension ("" when the portal is empty); a Swapper's two halves
+// (two slots) as "<top> + <bottom>" in the order they went on
 std::string figure_name();
+// one Swapper half alone on the portal: the next Swapper file of the other kind goes on beside it (Core of Light #72)
+bool needs_other_half();
 }  // namespace skylanders_portal

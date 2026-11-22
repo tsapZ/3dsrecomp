@@ -462,12 +462,19 @@ std::vector<Row> rows(Page p) {
             r.push_back({f, "›", "", nullptr, [dir, f] { push_portal(p8(u8p(dir) / u8p(f))); }});
         for (const auto &f : l.files) {
             const std::string path = p8(u8p(dir) / u8p(f)), name = p8(u8p(f).stem());
-            r.push_back({name, name == on ? "On the portal" : "", "", nullptr, [path, name] {
+            const bool is_on = on == name || on.rfind(name + " + ", 0) == 0 ||
+                               (on.size() > name.size() + 3 && on.compare(on.size() - name.size() - 3, std::string::npos,
+                                                                           " + " + name) == 0);
+            r.push_back({name, is_on ? "On the portal" : "", "", nullptr, [path, name] {
                              if (!skylanders_portal::place(path)) {
                                  say("Not a figure file: " + name);
                                  return;
                              }
-                             say("On the portal: " + name);
+                             if (skylanders_portal::needs_other_half()) {  // a Swapper half: its other half next
+                                 say("On the portal: " + name + ". Now pick its other half.");
+                                 return;
+                             }
+                             say("On the portal: " + skylanders_portal::figure_name());
                              toggle();  // back to the game, which sees it put on
                          }});
         }
