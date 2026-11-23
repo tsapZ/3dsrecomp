@@ -32,9 +32,13 @@ namespace {
 // game's infrared packets go to a USB Portal of Power as the same commands (the 3DS portal speaks the console portal's
 // protocol, after the light's colour), its answers come back. skylanders-portal's UsbPortal (HID, or WinUSB when a
 // player replaced the driver) as the Xbox 360 ports use it; what the game writes goes onto the real figure, as on a
-// console. Opened at the first packet with the setting on, again after the setting changed.
+// console. Opened at the first packet with the setting on, again after the setting changed; while none is found, looked
+// for every 2 s, and one that stops answering (unplugged) is closed and looked for again (found in a review,
+// 2026-11-23: before, a portal plugged in late or replugged needed the menu toggle, and an unplugged one made every
+// packet wait 300 ms for an answer with mx held, so the menu stuttered).
 std::unique_ptr<skylanders::portal::UsbPortal> usb;  // (under mx)
 bool usb_tried = false;
+std::chrono::steady_clock::time_point usb_next_try{};
 
 bool want_usb() {
     static const char *env = getenv("SKYLANDERS_PORTAL");
@@ -48,11 +52,18 @@ skylanders::portal::UsbPortal *usb_locked() {
         usb_tried = false;
         return nullptr;
     }
-    if (!usb && !usb_tried) {
+    if (usb && usb->SeemsDisconnected()) {
+        LOG("[portal] the real portal (USB) stopped answering: closed, looking for it again\n");
+        usb.reset();  // its destructor stops the speaker thread and closes the handles
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!usb && (!usb_tried || now >= usb_next_try)) {
+        const bool first = !usb_tried;
         usb_tried = true;
+        usb_next_try = now + std::chrono::seconds(2);
         usb = std::make_unique<skylanders::portal::UsbPortal>();
         if (!usb->IsOpen()) {
-            LOG("[portal] no real portal found (USB): the game sees an empty portal\n");
+            if (first) LOG("[portal] no real portal found (USB): the game sees an empty portal; looking again every 2 s\n");
             usb.reset();
         } else {
             LOG("[portal] real portal (USB) opened\n");
@@ -331,7 +342,7 @@ std::string real_portal_state() {
 #if RECOMP_USB_PORTAL
     if (!want_usb()) return "Off";
     if (usb) return usb->SeemsDisconnected() ? "Unplugged?" : "Connected";
-    return usb_tried ? "Not found" : "Waiting for the game";
+    return usb_tried ? "Not found: plug it in" : "Waiting for the game";
 #else
     return "Off";
 #endif
