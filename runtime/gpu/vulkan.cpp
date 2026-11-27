@@ -2326,6 +2326,10 @@ VkPipeline build_vs_pipeline(const VsBlob &v) {
 
 const void *vk_vs_kernel(const ShaderProgram *p, u32 entry, const ShaderSetup &s) {
     if (!active) return nullptr;
+    // GPU_CPU_VS=1: every draw's vertices shaded by the CPU, as the software renderer does (for comparing a picture
+    // with the kernels', Core of Light #168)
+    static const bool cpu_vs = getenv("GPU_CPU_VS") != nullptr;
+    if (cpu_vs) return nullptr;
     std::lock_guard<std::recursive_mutex> lk(vk_mtx);
     const u64 ph = shader_program_hash(p);
     const VsSpec sp = vs_spec(p, s);
