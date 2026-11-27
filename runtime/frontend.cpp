@@ -22,6 +22,7 @@
 
 #include "aim.h"
 #include "freecam.h"
+#include "rdoc_capture.h"
 #include "audio_iface.h"
 #include "gpu_iface.h"
 #include "kernel.h"
@@ -1178,6 +1179,7 @@ static bool shot_due(u64 n) {
 }
 
 static void present() {
+    rdoc_frame(frame_count);  // RECOMP_RDOC_FRAME (rdoc_capture.h)
     static u32 top[400 * 240], bottom[320 * 240];
     // faster than the 3DS: draw at most every 12 ms (a display shows no more), except the frames being captured
     static auto last_drawn = steady_clock::now();
