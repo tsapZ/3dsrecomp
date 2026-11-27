@@ -4,6 +4,7 @@
 #include "loader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
@@ -57,14 +58,23 @@ void fill_uniforms(Uni &u, const DrawState &ds, const RTConfig &rt, u32 scale) {
 }
 
 bool scissor_rect(const DrawState &ds, const RTConfig &rt, u32 scale, u32 out[4]) {
-    if (ds.scissor_mode != 3) {  // (the other modes clip in the fragment shader, against u.scissor)
-        out[0] = out[1] = 0;
-        out[2] = rt.w * scale;
-        out[3] = rt.h * scale;
-        return true;
+    s32 x1 = 0, x2 = (s32)rt.w, y1 = 0, y2 = (s32)rt.h;
+    if (ds.scissor_mode == 3) {  // (the other modes clip in the fragment shader, against u.scissor)
+        x1 = ds.sc_x1, x2 = ds.sc_x2, y1 = ds.sc_y1, y2 = ds.sc_y2;
     }
-    const s32 x1 = std::clamp<s32>(ds.sc_x1, 0, rt.w), x2 = std::clamp<s32>(ds.sc_x2, 0, rt.w);
-    const s32 y1 = std::clamp<s32>(ds.sc_y1, 0, rt.h), y2 = std::clamp<s32>(ds.sc_y2, 0, rt.h);
+    // The viewport: the PICA clips every primitive to it (clip-space x and y within +-w, the software renderer's planes
+    // 0-3), and the GPU renderers' clip space is the whole target, so the scissor keeps draws inside it. Without it a
+    // stereo frame's left-eye ground ran over into the right eye's half and covered it (Spyro's Adventure's first
+    // level, Core of Light #168). Pixel centres on the bounds count in, as in the software renderer's clipping.
+    if (ds.vp_hw == ds.vp_hw && ds.vp_hh == ds.vp_hh) {  // (not NaN)
+        const double vx[2] = {ds.vp_x, ds.vp_x + 2.0 * ds.vp_hw}, vy[2] = {ds.vp_y, ds.vp_y + 2.0 * ds.vp_hh};
+        x1 = std::max<s32>(x1, (s32)std::lround(std::min(vx[0], vx[1])));
+        x2 = std::min<s32>(x2, (s32)std::lround(std::max(vx[0], vx[1])));
+        y1 = std::max<s32>(y1, (s32)std::lround(std::min(vy[0], vy[1])));
+        y2 = std::min<s32>(y2, (s32)std::lround(std::max(vy[0], vy[1])));
+    }
+    x1 = std::clamp<s32>(x1, 0, rt.w), x2 = std::clamp<s32>(x2, 0, rt.w);
+    y1 = std::clamp<s32>(y1, 0, rt.h), y2 = std::clamp<s32>(y2, 0, rt.h);
     if (x2 <= x1 || y2 <= y1) return false;
     out[0] = (u32)x1 * scale;
     out[1] = (u32)(rt.h - y2) * scale;  // (PICA coordinates have y up)
